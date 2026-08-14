@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -569,15 +570,15 @@ func (r *Reporter) getIncidentsByID(ids []string) ([]Incident, error) {
 }
 
 // Health check handlers
-func (r *Reporter) healthHandler(w http.ResponseWriter, r *http.Request) {
+func (r *Reporter) healthHandler(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	if r.Method != http.MethodGet {
+	if req.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	// Check database connectivity
-	if err := r.db.PingContext(r.Context()); err != nil {
+	if err := r.db.PingContext(req.Context()); err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]string{
 			"status": "unhealthy",
@@ -596,15 +597,15 @@ func (r *Reporter) healthHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (r *Reporter) readyHandler(w http.ResponseWriter, r *http.Request) {
+func (r *Reporter) readyHandler(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	if r.Method != http.MethodGet {
+	if req.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	// Simple readiness check - if we can connect to db, we're ready
-	if err := r.db.PingContext(r.Context()); err != nil {
+	if err := r.db.PingContext(req.Context()); err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]string{
 			"status": "not ready",
@@ -618,9 +619,9 @@ func (r *Reporter) readyHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // reportHandler handles manual report generation requests
-func (r *Reporter) reportHandler(w http.ResponseWriter, r *http.Request) {
+func (r *Reporter) reportHandler(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	if r.Method != http.MethodPost {
+	if req.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -629,7 +630,7 @@ func (r *Reporter) reportHandler(w http.ResponseWriter, r *http.Request) {
 	var requestData struct {
 		IncidentIDs []string `json:"incident_ids,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
+	if err := json.NewDecoder(req.Body).Decode(&requestData); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
