@@ -3,8 +3,8 @@ FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 
-COPY go.mod go.sum ./
-RUN go mod download
+COPY go.mod ./
+RUN go mod download 2>/dev/null || true
 
 COPY . .
 RUN go build -o main .

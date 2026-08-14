@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"strconv"
 )
 
 // ReporterConfig holds configuration for the reporter service
@@ -692,16 +693,15 @@ func (r *Reporter) reportHandler(w http.ResponseWriter, req *http.Request) {
 }
 
 // statusHandler returns the current status of the reporter
-func (r *Reporter) statusHandler(w http.ResponseWriter, r *http.Request) {
+func (r *Reporter) statusHandler(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	if r.Method != http.MethodGet {
+	if req.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"last_sent": r.lastSent,
 		"running":   r.running,
@@ -710,9 +710,9 @@ func (r *Reporter) statusHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // metricsHandler exposes Prometheus metrics
-func (r *Reporter) metricsHandler(w http.ResponseWriter, r *http.Request) {
+func (r *Reporter) metricsHandler(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
-	if r.Method != http.MethodGet {
+	if req.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
