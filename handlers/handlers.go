@@ -64,7 +64,7 @@ func (h *Handler) HealthHandler(w http.ResponseWriter, r *http.Request) {
 		h.metrics.DBConnectionErrors.Inc()
 		log.Error().Err(err).Msg("Health check failed: database connection")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(models.HealthResponse{
+		_ = json.NewEncoder(w).Encode(models.HealthResponse{
 			Status: "unhealthy",
 			Error:  fmt.Sprintf("Database connection failed: %v", err),
 		})
@@ -77,7 +77,7 @@ func (h *Handler) HealthHandler(w http.ResponseWriter, r *http.Request) {
 	h.reporter.MuUnlock()
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(models.HealthResponse{
+	_ = json.NewEncoder(w).Encode(models.HealthResponse{
 		Status:    "healthy",
 		Timestamp: time.Now().UTC(),
 		LastSent:  lastSent,
@@ -97,7 +97,7 @@ func (h *Handler) ReadyHandler(w http.ResponseWriter, r *http.Request) {
 	if err := h.db.PingContext(r.Context()); err != nil {
 		log.Error().Err(err).Msg("Readiness check failed: database not ready")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(models.ReadyResponse{
+		_ = json.NewEncoder(w).Encode(models.ReadyResponse{
 			Status: "not ready",
 			Error:  fmt.Sprintf("Database not ready: %v", err),
 		})
@@ -105,7 +105,7 @@ func (h *Handler) ReadyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(models.ReadyResponse{Status: "ready"})
+	_ = json.NewEncoder(w).Encode(models.ReadyResponse{Status: "ready"})
 }
 
 // ReportHandler handles manual report generation
@@ -122,7 +122,7 @@ func (h *Handler) ReportHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(models.TriggerResponse{
+	_ = json.NewEncoder(w).Encode(models.TriggerResponse{
 		Message: "Daily report triggered successfully",
 	})
 }
@@ -138,12 +138,12 @@ func (h *Handler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	h.reporter.MuLock()
 	defer h.reporter.MuUnlock()
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"last_sent": h.reporter.LastSent(),
-		"running":   h.reporter.Running(),
-		"uptime":    time.Since(h.reporter.StartTime()).String(),
-		"version":   "1.0.0",
-	})
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"last_sent": h.reporter.LastSent(),
+			"running":   h.reporter.Running(),
+			"uptime":    time.Since(h.reporter.StartTime()).String(),
+			"version":   "1.0.0",
+		})
 }
 
 // MetricsHandler returns the Prometheus metrics handler

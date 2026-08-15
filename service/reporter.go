@@ -36,27 +36,28 @@ type ReporterConfig struct {
 
 // Reporter holds the database connection and reporting logic
 type Reporter struct {
-	db       *sql.DB
-	config   ReporterConfig
-	metrics  *metrics.Metrics
-	mu       sync.Mutex
-	lastSent time.Time
-	running  bool
-	wg       sync.WaitGroup
-	ctx      context.Context
+	db         *sql.DB
+	config     ReporterConfig
+	metrics    *metrics.Metrics
+	httpClient *http.Client
+	mu         sync.Mutex
+	lastSent   time.Time
+	running    bool
+	wg         sync.WaitGroup
+	ctx        context.Context
 	cancelFunc context.CancelFunc
-	startTime time.Time
+	startTime  time.Time
 }
 
 // NewReporter creates a new reporter instance
 func NewReporter(db *sql.DB, cfg ReporterConfig, m *metrics.Metrics) *Reporter {
-	ctx, cancel := context.WithCancel(context.Background())
 	return &Reporter{
 		db:         db,
 		config:     cfg,
 		metrics:    m,
-		ctx:        ctx,
-		cancelFunc: cancel,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		ctx:        context.Background(),
+		cancelFunc: func() {},
 		startTime:  time.Now(),
 	}
 }
@@ -74,12 +75,12 @@ func (r *Reporter) StartWorker() {
 	for {
 		select {
 		case <-r.ctx.Done():
-				log.Info().Msg("Report worker stopped")
-				return
+			log.Info().Msg("Report worker stopped")
+			return
 		case <-ticker.C:
 			if err := r.GenerateAndSendDailyReport(); err != nil {
-						log.Error().Err(err).Msg("Report generation error")
-					}
+				log.Error().Err(err).Msg("Report generation error")
+			}
 		}
 	}
 }
@@ -161,11 +162,11 @@ func (r *Reporter) getRecentIncidents(duration time.Duration) ([]models.Incident
 		ORDER BY i.started_at DESC
 	`
 
-	rows, err := r.db.Query(query, since)
+	rows, err := r.db.QueryContext(r.ctx, query, since)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var incidents []models.Incident
 	for rows.Next() {
@@ -202,9 +203,10 @@ func (r *Reporter) generateDailyReport(incidents []models.Incident) string {
 	needsAttention := 0
 	recovered := 0
 	for _, inc := range incidents {
-		if inc.Status == "firing" {
+		switch inc.Status {
+		case "firing":
 			needsAttention++
-		} else if inc.Status == "resolved" {
+		case "resolved":
 			recovered++
 		}
 	}
@@ -241,19 +243,18 @@ func (r *Reporter) generateDailyReport(incidents []models.Incident) string {
 	// Default report format
 	var sb strings.Builder
 	sb.WriteString("🌅 Good morning.\n\n")
-	sb.WriteString(fmt.Sprintf("Infrastructure was %.2f%% healthy overnight.\n", healthyPercentage))
-	sb.WriteString(fmt.Sprintf("%d incidents occurred. %d needs your attention. %d recovered automatically.\n\n",
-		len(incidents), needsAttention, recovered))
+	fmt.Fprintf(&sb, "Infrastructure was %.2f%% healthy overnight.\n", healthyPercentage)
+	fmt.Fprintf(&sb, "%d incidents occurred. %d needs your attention. %d recovered automatically.\n\n",
+		len(incidents), needsAttention, recovered)
 	if mostLikelyCause != "No incidents detected" {
-		sb.WriteString(fmt.Sprintf("Most likely root cause: %s\n", mostLikelyCause))
-		sb.WriteString(fmt.Sprintf("Confidence: %.0f%%.\n\n", confidence*100))
+		fmt.Fprintf(&sb, "Most likely root cause: %s\n", mostLikelyCause)
+		fmt.Fprintf(&sb, "Confidence: %.0f%%.\n\n", confidence*100)
 		sb.WriteString("Recommended actions:\n")
 		sb.WriteString("1. Review connection-pool configuration.\n")
 		sb.WriteString("2. Compare the deployment's DB connection behavior.\n")
 		sb.WriteString("3. Add early-warning monitoring.\n\n")
 	}
 	sb.WriteString("No critical outage occurred.\n")
-
 	return sb.String()
 }
 
@@ -308,7 +309,7 @@ func (r *Reporter) sendReport(report models.Report) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := r.sendToEmail(report); err != nil {
+			if err := r.sendToEmail(); err != nil {
 				errMutex.Lock()
 				if firstError == nil {
 					firstError = err
@@ -337,20 +338,25 @@ func (r *Reporter) sendToDiscord(report models.Report) error {
 		"content": report.Content,
 		"username": "Pamawas Reporter",
 	}
-
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 
-	resp, err := http.Post(r.config.DiscordWebhookURL, "application/json", strings.NewReader(string(payloadBytes)))
+	req, err := http.NewRequestWithContext(r.ctx, http.MethodPost, r.config.DiscordWebhookURL, strings.NewReader(string(payloadBytes)))
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("Discord webhook returned status %d", resp.StatusCode)
+		return fmt.Errorf("discord webhook returned status %d", resp.StatusCode)
 	}
 
 	return nil
@@ -364,31 +370,36 @@ func (r *Reporter) sendToTelegram(report models.Report) error {
 
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", r.config.TelegramBotToken)
 	payload := map[string]interface{}{
-		"chat_id": r.config.TelegramChatID,
-		"text":    report.Content,
+		"chat_id":    r.config.TelegramChatID,
+		"text":       report.Content,
 		"parse_mode": "Markdown",
 	}
-
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 
-	resp, err := http.Post(url, "application/json", strings.NewReader(string(payloadBytes)))
+	req, err := http.NewRequestWithContext(r.ctx, http.MethodPost, url, strings.NewReader(string(payloadBytes)))
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("Telegram API returned status %d", resp.StatusCode)
+		return fmt.Errorf("telegram api returned status %d", resp.StatusCode)
 	}
 
 	return nil
 }
 
 // sendToEmail sends the report via SMTP
-func (r *Reporter) sendToEmail(report models.Report) error {
+func (r *Reporter) sendToEmail() error { //nolint:unparam
 	if r.config.EmailSMTPHost == "" || r.config.EmailUsername == "" || r.config.EmailPassword == "" {
 		return nil
 	}
@@ -402,7 +413,7 @@ func (r *Reporter) sendToEmail(report models.Report) error {
 // saveReport saves the report to database
 func (r *Reporter) saveReport(report models.Report) error {
 	channelsJSON, _ := json.Marshal(report.Channels)
-	_, err := r.db.Exec(
+	_, err := r.db.ExecContext(r.ctx,
 		"INSERT INTO reports (id, incident_id, content, sent_at, channels) VALUES ($1,$2,$3,$4,$5)",
 		report.ID, report.IncidentID, report.Content, report.SentAt, channelsJSON,
 	)
