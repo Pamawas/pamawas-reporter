@@ -1,9 +1,9 @@
 package handlers
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -149,4 +149,9 @@ func (h *Handler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 // MetricsHandler returns the Prometheus metrics handler
 func (h *Handler) MetricsHandler() http.Handler {
 	return promhttp.Handler()
+}
+
+// Reporter returns the reporter instance
+func (h *Handler) Reporter() *service.Reporter {
+	return h.reporter
 }

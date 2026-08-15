@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -11,13 +10,12 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/Pamawas/pamawas-reporter/config"
 	"github.com/Pamawas/pamawas-reporter/handlers"
 	"github.com/Pamawas/pamawas-reporter/metrics"
-	"github.com/Pamawas/pamawas-reporter/service"
 )
 
 func main() {
@@ -46,7 +44,7 @@ func main() {
 		if err := db.PingContext(ctx); err == nil {
 			break
 		}
-		log.Printf("Waiting for database... (%d/30)", i+1)
+		log.Info().Int("attempt", i+1).Msg("Waiting for database...")
 		time.Sleep(1 * time.Second)
 	}
 

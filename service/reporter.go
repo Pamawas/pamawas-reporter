@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -75,12 +74,12 @@ func (r *Reporter) StartWorker() {
 	for {
 		select {
 		case <-r.ctx.Done():
-			log.Println("Report worker stopped")
-			return
+				log.Info().Msg("Report worker stopped")
+				return
 		case <-ticker.C:
 			if err := r.GenerateAndSendDailyReport(); err != nil {
-				log.Printf("Report generation error: %v", err)
-			}
+						log.Error().Err(err).Msg("Report generation error")
+					}
 		}
 	}
 }
@@ -275,10 +274,10 @@ func (r *Reporter) sendReport(report models.Report) error {
 					firstError = err
 				}
 				errMutex.Unlock()
-				log.Printf("Failed to send report to Discord: %v", err)
+				log.Error().Err(err).Msg("Failed to send report to Discord")
 				r.metrics.DeliveryTotal.WithLabelValues("discord", "error").Inc()
 			} else {
-				log.Printf("Report sent to Discord successfully")
+				log.Info().Msg("Report sent to Discord successfully")
 				r.metrics.DeliveryTotal.WithLabelValues("discord", "success").Inc()
 			}
 		}()
@@ -295,10 +294,10 @@ func (r *Reporter) sendReport(report models.Report) error {
 					firstError = err
 				}
 				errMutex.Unlock()
-				log.Printf("Failed to send report to Telegram: %v", err)
+				log.Error().Err(err).Msg("Failed to send report to Telegram")
 				r.metrics.DeliveryTotal.WithLabelValues("telegram", "error").Inc()
 			} else {
-				log.Printf("Report sent to Telegram successfully")
+				log.Info().Msg("Report sent to Telegram successfully")
 				r.metrics.DeliveryTotal.WithLabelValues("telegram", "success").Inc()
 			}
 		}()
@@ -315,10 +314,10 @@ func (r *Reporter) sendReport(report models.Report) error {
 					firstError = err
 				}
 				errMutex.Unlock()
-				log.Printf("Failed to send report via email: %v", err)
+				log.Error().Err(err).Msg("Failed to send report via email")
 				r.metrics.DeliveryTotal.WithLabelValues("email", "error").Inc()
 			} else {
-				log.Printf("Report sent via email successfully")
+				log.Info().Msg("Report sent via email successfully")
 				r.metrics.DeliveryTotal.WithLabelValues("email", "success").Inc()
 			}
 		}()
@@ -396,7 +395,7 @@ func (r *Reporter) sendToEmail(report models.Report) error {
 
 	// In a real implementation, you'd use net/smtp or a library like go-gomail
 	// This is a placeholder for the MVP
-	log.Printf("Email sending not fully implemented - would send to SMTP: %s", r.config.EmailSMTPHost)
+	log.Info().Str("smtp_host", r.config.EmailSMTPHost).Msg("Email sending not fully implemented")
 	return nil
 }
 

@@ -9,6 +9,8 @@ import (
 type Config struct {
 	DatabaseURL        string
 	Port               string
+	LogLevel           string
+	Environment        string
 	DiscordWebhookURL  string
 	TelegramBotToken   string
 	TelegramChatID     string
@@ -30,6 +32,8 @@ func Load() Config {
 	cfg := Config{
 		DatabaseURL:        getEnv("DATABASE_URL", ""),
 		Port:               getEnv("PORT", "8080"),
+		LogLevel:           getEnv("LOG_LEVEL", "info"),
+		Environment:        getEnv("ENVIRONMENT", "development"),
 		DiscordWebhookURL:  getEnv("DISCORD_WEBHOOK_URL", ""),
 		TelegramBotToken:   getEnv("TELEGRAM_BOT_TOKEN", ""),
 		TelegramChatID:     getEnv("TELEGRAM_CHAT_ID", ""),
