@@ -37,6 +37,7 @@ func NewHandler(db *sql.DB, cfg config.Config, m *metrics.Metrics) *Handler {
 		EmailUsername:      cfg.EmailUsername,
 		EmailPassword:      cfg.EmailPassword,
 		EmailFrom:          cfg.EmailFrom,
+		EmailTo:            cfg.EmailTo,
 		ReportTemplate:     cfg.ReportTemplate,
 		ReportInterval:     cfg.ReportInterval,
 		Mode:               cfg.Mode,

@@ -2,9 +2,9 @@ package config
 
 import (
 	"fmt"
-	"os"
-	"strconv"
 	"time"
+
+	"github.com/spf13/viper"
 )
 
 type Config struct {
@@ -20,51 +20,75 @@ type Config struct {
 	EmailUsername      string
 	EmailPassword      string
 	EmailFrom          string
+	EmailTo            string
 	ReportTemplate     string
 	ReportInterval     time.Duration
 	Mode               string
 }
 
 func Load() Config {
-	portStr := getEnv("EMAIL_SMTP_PORT", "587")
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		panic(fmt.Sprintf("invalid EMAIL_SMTP_PORT: %v", err))
+	v := viper.New()
+	v.SetConfigName("config")
+	v.SetConfigType("yaml")
+	v.AddConfigPath(".")
+	v.AddConfigPath("./config")
+	v.AddConfigPath("/etc/pamawas/")
+	v.SetEnvPrefix("PAMAWAS_REPORTER")
+	v.AutomaticEnv()
+
+	// Defaults
+	v.SetDefault("port", "8080")
+	v.SetDefault("log_level", "info")
+	v.SetDefault("environment", "development")
+	v.SetDefault("email_smtp_port", 587)
+	v.SetDefault("report_interval", "1h")
+	v.SetDefault("mode", "auto")
+
+	if err := v.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			panic(fmt.Sprintf("failed to read config: %v", err))
+		}
 	}
 
-	intervalStr := getEnv("REPORT_INTERVAL", "1h")
-	interval, err := time.ParseDuration(intervalStr)
+	reportInterval, err := time.ParseDuration(v.GetString("report_interval"))
 	if err != nil {
-		panic(fmt.Sprintf("invalid REPORT_INTERVAL: %v", err))
+		panic(fmt.Sprintf("invalid report_interval: %v", err))
 	}
 
 	cfg := Config{
-		DatabaseURL:        getEnv("DATABASE_URL", ""),
-		Port:               getEnv("PORT", "8080"),
-		LogLevel:           getEnv("LOG_LEVEL", "info"),
-		Environment:        getEnv("ENVIRONMENT", "development"),
-		DiscordWebhookURL:  getEnv("DISCORD_WEBHOOK_URL", ""),
-		TelegramBotToken:   getEnv("TELEGRAM_BOT_TOKEN", ""),
-		TelegramChatID:     getEnv("TELEGRAM_CHAT_ID", ""),
-		EmailSMTPHost:      getEnv("EMAIL_SMTP_HOST", ""),
-		EmailSMTPPort:      port,
-		EmailUsername:      getEnv("EMAIL_USERNAME", ""),
-		EmailPassword:      getEnv("EMAIL_PASSWORD", ""),
-		EmailFrom:          getEnv("EMAIL_FROM", ""),
-		ReportTemplate:     getEnv("REPORT_TEMPLATE", ""),
-		ReportInterval:     interval,
-		Mode:               getEnv("REPORTER_MODE", "auto"),
+		DatabaseURL:        v.GetString("database_url"),
+		Port:               v.GetString("port"),
+		LogLevel:           v.GetString("log_level"),
+		Environment:        v.GetString("environment"),
+		DiscordWebhookURL:  v.GetString("discord_webhook_url"),
+		TelegramBotToken:   v.GetString("telegram_bot_token"),
+		TelegramChatID:     v.GetString("telegram_chat_id"),
+		EmailSMTPHost:      v.GetString("email_smtp_host"),
+		EmailSMTPPort:      v.GetInt("email_smtp_port"),
+		EmailUsername:      v.GetString("email_username"),
+		EmailPassword:      v.GetString("email_password"),
+		EmailFrom:          v.GetString("email_from"),
+		EmailTo:            v.GetString("email_to"),
+		ReportTemplate:     v.GetString("report_template"),
+		ReportInterval:     reportInterval,
+		Mode:               v.GetString("mode"),
 	}
 
 	if cfg.DatabaseURL == "" {
-		panic("DATABASE_URL environment variable not set")
+		panic("DATABASE_URL not set (config file or PAMAWAS_REPORTER_DATABASE_URL env var)")
 	}
 	return cfg
 }
 
-func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+func (c Config) Validate() error {
+	if c.DatabaseURL == "" {
+		return fmt.Errorf("database_url is required")
 	}
-	return fallback
+	if c.Port == "" {
+		return fmt.Errorf("port is required")
+	}
+	if c.ReportInterval <= 0 {
+		return fmt.Errorf("report_interval must be positive")
+	}
+	return nil
 }

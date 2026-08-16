@@ -1,0 +1,19 @@
+# pamawas-reporter configuration
+# Copy this to config.yaml and adjust values, or use environment variables with PAMAWAS_REPORTER_ prefix
+
+database_url: "postgres://pamawas:pamawas@localhost:5432/pamawas?sslmode=disable"
+port: "8080"
+log_level: "info"
+environment: "development"
+discord_webhook_url: ""
+telegram_bot_token: ""
+telegram_chat_id: ""
+email_smtp_host: ""
+email_smtp_port: 587
+email_username: ""
+email_password: ""
+email_from: ""
+email_to: ""
+report_template: ""
+report_interval: "1h"
+mode: "auto"

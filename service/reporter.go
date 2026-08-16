@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"github.com/wneessen/go-mail"
 
 	"github.com/Pamawas/pamawas-reporter/metrics"
 	"github.com/Pamawas/pamawas-reporter/models"
@@ -29,6 +30,7 @@ type ReporterConfig struct {
 	EmailUsername      string
 	EmailPassword      string
 	EmailFrom          string
+	EmailTo            string
 	ReportTemplate     string
 	ReportInterval     time.Duration
 	Mode               string
@@ -190,6 +192,36 @@ func (r *Reporter) getRecentIncidents(duration time.Duration) ([]models.Incident
 	return incidents, rows.Err()
 }
 
+// getEvidenceForIncident retrieves evidence findings for a specific incident
+func (r *Reporter) getEvidenceForIncident(incidentID string) ([]models.Evidence, error) {
+	query := `
+		SELECT id, incident_id, type, content, source, confidence
+		FROM evidence
+		WHERE incident_id = $1
+		ORDER BY confidence DESC
+	`
+
+	rows, err := r.db.QueryContext(r.ctx, query, incidentID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close rows")
+		}
+	}()
+
+	var evidenceList []models.Evidence
+	for rows.Next() {
+		var ev models.Evidence
+		if err := rows.Scan(&ev.ID, &ev.IncidentID, &ev.Type, &ev.Content, &ev.Source, &ev.Confidence); err != nil {
+			return nil, err
+		}
+		evidenceList = append(evidenceList, ev)
+	}
+	return evidenceList, rows.Err()
+}
+
 // generateDailyReport creates a formatted daily digest report
 func (r *Reporter) generateDailyReport(incidents []models.Incident) string {
 	renderStart := time.Now()
@@ -215,14 +247,15 @@ func (r *Reporter) generateDailyReport(incidents []models.Incident) string {
 		}
 	}
 
-	var mostLikelyCause string
-	var confidence float64
-	if len(incidents) > 0 {
-		mostLikelyCause = "database connection exhaustion following the 01:47 deployment"
-		confidence = 0.87
-	} else {
-		mostLikelyCause = "No incidents detected"
-		confidence = 1.0
+	// Fetch evidence for all incidents
+	incidentEvidence := make(map[string][]models.Evidence)
+	for _, inc := range incidents {
+		evidence, err := r.getEvidenceForIncident(inc.ID)
+		if err != nil {
+			log.Error().Err(err).Str("incident_id", inc.ID).Msg("Failed to fetch evidence for incident")
+		} else if len(evidence) > 0 {
+			incidentEvidence[inc.ID] = evidence
+		}
 	}
 
 	// Build report using template or default format
@@ -232,8 +265,8 @@ func (r *Reporter) generateDailyReport(incidents []models.Incident) string {
 			"TotalIncidents":    len(incidents),
 			"NeedsAttention":    needsAttention,
 			"Recovered":         recovered,
-			"MostLikelyCause":   mostLikelyCause,
-			"Confidence":        confidence,
+			"Incidents":         incidents,
+			"Evidence":          incidentEvidence,
 			"Timestamp":         time.Now().Format("2006-01-02 15:04:05"),
 		}
 
@@ -244,20 +277,41 @@ func (r *Reporter) generateDailyReport(incidents []models.Incident) string {
 		return content
 	}
 
-	// Default report format
+	// Default report format with evidence
 	var sb strings.Builder
 	sb.WriteString("🌅 Good morning.\n\n")
 	fmt.Fprintf(&sb, "Infrastructure was %.2f%% healthy overnight.\n", healthyPercentage)
 	fmt.Fprintf(&sb, "%d incidents occurred. %d needs your attention. %d recovered automatically.\n\n",
 		len(incidents), needsAttention, recovered)
-	if mostLikelyCause != "No incidents detected" {
-		fmt.Fprintf(&sb, "Most likely root cause: %s\n", mostLikelyCause)
-		fmt.Fprintf(&sb, "Confidence: %.0f%%.\n\n", confidence*100)
-		sb.WriteString("Recommended actions:\n")
-		sb.WriteString("1. Review connection-pool configuration.\n")
-		sb.WriteString("2. Compare the deployment's DB connection behavior.\n")
-		sb.WriteString("3. Add early-warning monitoring.\n\n")
+
+	if len(incidents) > 0 {
+		for _, inc := range incidents {
+			fmt.Fprintf(&sb, "📋 Incident: %s (%s)\n", inc.Title, inc.Status)
+			fmt.Fprintf(&sb, "   ID: %s | Severity: %s | Services: %s\n", inc.ID[:8], inc.Severity, strings.Join(inc.AffectedServices, ", "))
+			fmt.Fprintf(&sb, "   Started: %s\n", inc.StartedAt.Format("2006-01-02 15:04:05"))
+
+			// Include evidence if available
+			if evList, ok := incidentEvidence[inc.ID]; ok && len(evList) > 0 {
+				sb.WriteString("   🔍 Investigation Findings:\n")
+				for _, ev := range evList {
+					typeIcon := map[string]string{
+						"fact":          "✅",
+						"likely_cause":  "🎯",
+						"hypothesis":    "💭",
+						"unknown":       "❓",
+					}[ev.Type]
+					if typeIcon == "" {
+						typeIcon = "📝"
+					}
+					fmt.Fprintf(&sb, "      %s [%s] (%.0f%%) %s\n", typeIcon, strings.ToUpper(ev.Type), ev.Confidence*100, ev.Content)
+				}
+			}
+			sb.WriteString("\n")
+		}
+	} else {
+		sb.WriteString("No incidents detected.\n\n")
 	}
+
 	sb.WriteString("No critical outage occurred.\n")
 	return sb.String()
 }
@@ -313,7 +367,7 @@ func (r *Reporter) sendReport(report models.Report) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := r.sendToEmail(); err != nil {
+			if err := r.sendToEmail(report); err != nil {
 				errMutex.Lock()
 				if firstError == nil {
 					firstError = err
@@ -411,14 +465,50 @@ func (r *Reporter) sendToTelegram(report models.Report) error {
 }
 
 // sendToEmail sends the report via SMTP
-func (r *Reporter) sendToEmail() error { //nolint:unparam
+func (r *Reporter) sendToEmail(report models.Report) error {
 	if r.config.EmailSMTPHost == "" || r.config.EmailUsername == "" || r.config.EmailPassword == "" {
 		return nil
 	}
 
-	// In a real implementation, you'd use net/smtp or a library like go-gomail
-	// This is a placeholder for the MVP
-	log.Info().Str("smtp_host", r.config.EmailSMTPHost).Msg("Email sending not fully implemented")
+	// Create email client
+	client, err := mail.NewClient(r.config.EmailSMTPHost,
+		mail.WithPort(r.config.EmailSMTPPort),
+		mail.WithSMTPAuth(mail.SMTPAuthPlain),
+		mail.WithUsername(r.config.EmailUsername),
+		mail.WithPassword(r.config.EmailPassword),
+		mail.WithTLSPortPolicy(mail.TLSMandatory),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create SMTP client: %w", err)
+	}
+
+	// Build email message
+	msg := mail.NewMsg()
+	if err := msg.From(r.config.EmailFrom); err != nil {
+		return fmt.Errorf("failed to set from address: %w", err)
+	}
+	if err := msg.To(r.config.EmailTo); err != nil {
+		return fmt.Errorf("failed to set to address: %w", err)
+	}
+
+	msg.Subject("Pamawas Daily Infrastructure Report")
+
+	// Set plain text body
+	msg.SetBodyString(mail.TypeTextPlain, report.Content)
+
+	// Set HTML body (simple conversion from plain text)
+	htmlBody := strings.ReplaceAll(report.Content, "\n", "<br>")
+	msg.SetBodyString(mail.TypeTextHTML, htmlBody)
+
+	// Send email with context
+	ctx, cancel := context.WithTimeout(r.ctx, 10*time.Second)
+	defer cancel()
+
+	if err := client.DialAndSendWithContext(ctx, msg); err != nil {
+		return fmt.Errorf("failed to send email: %w", err)
+	}
+
+	log.Info().Str("smtp_host", r.config.EmailSMTPHost).Str("to", r.config.EmailTo).Msg("Email sent successfully")
 	return nil
 }
 
