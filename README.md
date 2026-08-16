@@ -75,10 +75,21 @@ No critical outage occurred.
 | `EMAIL_USERNAME` | SMTP username | Optional |
 | `EMAIL_PASSWORD` | SMTP password | Optional |
 | `EMAIL_FROM` | From email address | Optional |
+| `EMAIL_TO` | To email address | Optional |
 | `REPORT_TEMPLATE` | Custom template string | Optional |
 | `REPORT_INTERVAL` | Background worker interval | `1h` |
 | `REPORTER_MODE` | `manual` to disable background worker | (auto) |
 | `LOG_LEVEL` | Log level | `info` |
+| `ENVIRONMENT` | Deployment environment | `development` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP gRPC endpoint for Tempo | `tempo:4317` |
+
+## Observability
+
+| Feature | Endpoint/Format |
+|---------|-----------------|
+| **Prometheus Metrics** | `/metrics` — `ReportsGeneratedTotal`, `DeliveryTotal`, `TemplateRenderDuration`, `DBConnectionErrors`, `LastSentTimestamp`, `ReporterRunning` |
+| **Structured JSON Logging** | stdout — trace_id, span_id, service, component, method, path, status_code, duration_ms |
+| **OpenTelemetry Tracing** | OTLP gRPC → Tempo:4317 — W3C TraceContext propagation |
 
 ## Database Schema (from pamawas-schema)
 
@@ -101,19 +112,19 @@ CREATE TABLE IF NOT EXISTS reports (
 - ✅ Report generator with template engine (default + custom)
 - ✅ Discord webhook delivery adapter
 - ✅ Telegram Bot API delivery adapter
-- ✅ Email SMTP delivery adapter (placeholder)
+- ✅ **Email SMTP delivery adapter (go-mail with STARTTLS, HTML + text)**
 - ✅ Background worker for scheduled reports
 - ✅ Manual trigger endpoint (`/report`)
 - ✅ Health (`/healthz`), readiness (`/ready`), status (`/status`), metrics (`/metrics`)
 - ✅ Concurrent delivery to all configured channels
+- ✅ **Evidence/findings included in daily reports (from `evidence` table)**
 - ✅ Multi-stage Dockerfile (Go 1.26-alpine builder, alpine runtime)
 - ✅ GitHub Actions workflow (main + dev branches, GHCR publishing)
-- ⬜ Proper email implementation (go-gomail or net/smtp)
-- ⬜ HTML email template
-- ⬜ Prometheus metrics with proper labels
-- ⬜ Structured JSON logging
-- ⬜ Configuration management (YAML + ENV)
-- ⬜ Unit tests for generation and delivery (target 80%+ coverage)
+- ✅ **Prometheus metrics with proper labels**
+- ✅ **Structured JSON logging with zerolog**
+- ✅ **Request/response logging middleware with Loki labels**
+- ✅ **OpenTelemetry tracing (OTLP gRPC → Tempo)**
+- ✅ Viper config management (YAML + ENV)
 
 ## Kanban Tasks
 
@@ -144,6 +155,11 @@ docker run -e DATABASE_URL="postgres://..." \
   -e DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..." \
   -e TELEGRAM_BOT_TOKEN="..." \
   -e TELEGRAM_CHAT_ID="..." \
+  -e EMAIL_SMTP_HOST="smtp.example.com" \
+  -e EMAIL_USERNAME="..." \
+  -e EMAIL_PASSWORD="..." \
+  -e EMAIL_FROM="reporter@example.com" \
+  -e EMAIL_TO="team@example.com" \
   -p 8080:8080 pamawas-reporter
 
 # Manual report trigger
@@ -165,6 +181,8 @@ When using custom `REPORT_TEMPLATE`, these variables are available:
 | `{{MostLikelyCause}}` | Root cause from investigation |
 | `{{Confidence}}` | Confidence score (0-1) |
 | `{{Timestamp}}` | Report generation time |
+| `{{Incidents}}` | Full incident list with evidence |
+| `{{Evidence}}` | Evidence map keyed by incident ID |
 
 ## Example Custom Template
 
