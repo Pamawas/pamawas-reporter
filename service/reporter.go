@@ -166,7 +166,11 @@ func (r *Reporter) getRecentIncidents(duration time.Duration) ([]models.Incident
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close rows")
+		}
+	}()
 
 	var incidents []models.Incident
 	for rows.Next() {
@@ -353,7 +357,11 @@ func (r *Reporter) sendToDiscord(report models.Report) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close response body")
+		}
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("discord webhook returned status %d", resp.StatusCode)
@@ -389,7 +397,11 @@ func (r *Reporter) sendToTelegram(report models.Report) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close response body")
+		}
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("telegram api returned status %d", resp.StatusCode)
@@ -412,8 +424,11 @@ func (r *Reporter) sendToEmail() error { //nolint:unparam
 
 // saveReport saves the report to database
 func (r *Reporter) saveReport(report models.Report) error {
-	channelsJSON, _ := json.Marshal(report.Channels)
-	_, err := r.db.ExecContext(r.ctx,
+	channelsJSON, err := json.Marshal(report.Channels)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.ExecContext(r.ctx,
 		"INSERT INTO reports (id, incident_id, content, sent_at, channels) VALUES ($1,$2,$3,$4,$5)",
 		report.ID, report.IncidentID, report.Content, report.SentAt, channelsJSON,
 	)

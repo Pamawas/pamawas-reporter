@@ -32,7 +32,11 @@ func TestReporter_GenerateDailyReport(t *testing.T) {
 	if err != nil {
 		t.Skipf("Skipping test: cannot open database: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Logf("Failed to close database: %v", closeErr)
+		}
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

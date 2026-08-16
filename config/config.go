@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"time"
@@ -25,9 +26,17 @@ type Config struct {
 }
 
 func Load() Config {
-	port, _ := strconv.Atoi(getEnv("EMAIL_SMTP_PORT", "587"))
+	portStr := getEnv("EMAIL_SMTP_PORT", "587")
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		panic(fmt.Sprintf("invalid EMAIL_SMTP_PORT: %v", err))
+	}
+
 	intervalStr := getEnv("REPORT_INTERVAL", "1h")
-	interval, _ := time.ParseDuration(intervalStr)
+	interval, err := time.ParseDuration(intervalStr)
+	if err != nil {
+		panic(fmt.Sprintf("invalid REPORT_INTERVAL: %v", err))
+	}
 
 	cfg := Config{
 		DatabaseURL:        getEnv("DATABASE_URL", ""),

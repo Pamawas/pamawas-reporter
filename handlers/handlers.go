@@ -64,10 +64,12 @@ func (h *Handler) HealthHandler(w http.ResponseWriter, r *http.Request) {
 		h.metrics.DBConnectionErrors.Inc()
 		log.Error().Err(err).Msg("Health check failed: database connection")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(models.HealthResponse{
+		if encodeErr := json.NewEncoder(w).Encode(models.HealthResponse{
 			Status: "unhealthy",
 			Error:  fmt.Sprintf("Database connection failed: %v", err),
-		})
+		}); encodeErr != nil {
+			log.Error().Err(encodeErr).Msg("Failed to encode health response")
+		}
 		return
 	}
 
@@ -77,13 +79,15 @@ func (h *Handler) HealthHandler(w http.ResponseWriter, r *http.Request) {
 	h.reporter.MuUnlock()
 
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(models.HealthResponse{
+	if err := json.NewEncoder(w).Encode(models.HealthResponse{
 		Status:    "healthy",
 		Timestamp: time.Now().UTC(),
 		LastSent:  lastSent,
 		Running:   running,
 		Version:   "1.0.0",
-	})
+	}); err != nil {
+		log.Error().Err(err).Msg("Failed to encode health response")
+	}
 }
 
 // ReadyHandler handles readiness check requests
@@ -97,15 +101,19 @@ func (h *Handler) ReadyHandler(w http.ResponseWriter, r *http.Request) {
 	if err := h.db.PingContext(r.Context()); err != nil {
 		log.Error().Err(err).Msg("Readiness check failed: database not ready")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(models.ReadyResponse{
+		if encodeErr := json.NewEncoder(w).Encode(models.ReadyResponse{
 			Status: "not ready",
 			Error:  fmt.Sprintf("Database not ready: %v", err),
-		})
+		}); encodeErr != nil {
+			log.Error().Err(encodeErr).Msg("Failed to encode ready response")
+		}
 		return
 	}
 
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(models.ReadyResponse{Status: "ready"})
+	if err := json.NewEncoder(w).Encode(models.ReadyResponse{Status: "ready"}); err != nil {
+		log.Error().Err(err).Msg("Failed to encode ready response")
+	}
 }
 
 // ReportHandler handles manual report generation
@@ -122,9 +130,11 @@ func (h *Handler) ReportHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(models.TriggerResponse{
+	if err := json.NewEncoder(w).Encode(models.TriggerResponse{
 		Message: "Daily report triggered successfully",
-	})
+	}); err != nil {
+		log.Error().Err(err).Msg("Failed to encode trigger response")
+	}
 }
 
 // StatusHandler returns the current status of the reporter
@@ -138,12 +148,14 @@ func (h *Handler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	h.reporter.MuLock()
 	defer h.reporter.MuUnlock()
 
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"last_sent": h.reporter.LastSent(),
-			"running":   h.reporter.Running(),
-			"uptime":    time.Since(h.reporter.StartTime()).String(),
-			"version":   "1.0.0",
-		})
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"last_sent": h.reporter.LastSent(),
+		"running":   h.reporter.Running(),
+		"uptime":    time.Since(h.reporter.StartTime()).String(),
+		"version":   "1.0.0",
+	}); err != nil {
+		log.Error().Err(err).Msg("Failed to encode status response")
+	}
 }
 
 // MetricsHandler returns the Prometheus metrics handler
