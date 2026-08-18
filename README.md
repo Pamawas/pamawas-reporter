@@ -1,32 +1,19 @@
 # pamawas-reporter
 
-**Report Generation & Delivery** — Morning digest format, Discord/Telegram/Email adapters
+**Report Generation & Delivery** — Renders investigation findings into morning digest format and delivers via Discord, Telegram, and Email.
 
-Language: Go 1.26
+[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev/)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)](https://docker.com/)
+
+---
 
 ## Purpose
 
-Generates formatted reports from investigation findings and delivers them via multiple channels. Consumes incident data, evidence, and findings from PostgreSQL and renders them into the target morning digest format (MVP §9). Supports Discord, Telegram, and Email delivery.
+Generates human-readable reports from correlated incidents and their investigation evidence, then delivers them through multiple channels with independent retry logic.
 
-## MVP Reference
+## Report Format (Morning Digest)
 
-- **MVP §10 Build Order #4**: Report generator — render incident + evidence into target report shape
-- **MVP §10 Build Order #5**: Delivery adapters — Discord → Telegram → Email (in that order)
-- **MVP §9 Delivery**: All channels consume same rendered report; only formatting/transport differs
-- **MVP §9 Report Shape**: Morning digest format with healthy %, incident count, root cause, confidence, recommendations
-
-## Responsibilities
-
-- Query recent incidents and their evidence/findings from PostgreSQL
-- Render reports using template engine (default + custom templates)
-- Deliver via Discord webhook, Telegram Bot API, Email SMTP
-- Background worker for scheduled daily reports
-- Manual trigger endpoint for on-demand reports
-- Health/metrics endpoints
-
-## Report Format (MVP §9 Target)
-
-```text
+```
 🌅 Good morning.
 
 Infrastructure was 99.97% healthy overnight.
@@ -43,29 +30,45 @@ Recommended actions:
 No critical outage occurred.
 ```
 
-## Endpoints
+## Delivery Channels
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/healthz` | GET | Health check with DB connectivity |
-| `/ready` | GET | Readiness check |
-| `/report` | POST | Manual report generation trigger |
-| `/status` | GET | Last sent report info |
-| `/metrics` | GET | Prometheus metrics |
+| Channel | Mechanism | Setup |
+|---------|-----------|-------|
+| **Discord** | Webhook POST with embeds | Low — webhook URL only |
+| **Telegram** | Bot API POST | Low — bot token + chat ID |
+| **Email** | SMTP with STARTTLS, HTML + text | Medium — SMTP credentials |
 
-## Delivery Channels (MVP §9)
+All channels consume the same rendered report; only formatting/transport differs. Deliveries retry independently without duplicating successful sends.
 
-| Channel | Mechanism | Setup Cost | Priority |
-|---------|-----------|------------|----------|
-| Discord | Webhook POST with embeds | Low — no auth flow | 1st |
-| Telegram | Bot API POST | Low — bot token + chat ID | 2nd |
-| Email | SMTP or transactional (SES/Postmark) | Higher — credentials + HTML | 3rd |
+## Quick Start
 
-## Configuration (Environment Variables)
+```bash
+# Docker
+docker run -e DATABASE_URL="postgres://user:pass@host:5432/db" \
+  -e DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..." \
+  -e TELEGRAM_BOT_TOKEN="..." \
+  -e TELEGRAM_CHAT_ID="..." \
+  -e EMAIL_SMTP_HOST="smtp.example.com" \
+  -e EMAIL_USERNAME="..." \
+  -e EMAIL_PASSWORD="..." \
+  -e EMAIL_FROM="reporter@example.com" \
+  -e EMAIL_TO="team@example.com" \
+  -p 8080:8080 ghcr.io/yoganovvaindra/pamawas-reporter:latest
+
+# Local development
+go run main.go
+
+# Manual report trigger
+curl -X POST http://localhost:8080/report \
+  -H "Content-Type: application/json" \
+  -d '{"source": "manual"}'
+```
+
+## Configuration
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DATABASE_URL` | PostgreSQL connection string | Required |
+| `DATABASE_URL` | PostgreSQL connection string | **Required** |
 | `PORT` | HTTP server port | `8080` |
 | `DISCORD_WEBHOOK_URL` | Discord webhook URL | Optional |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token | Optional |
@@ -78,99 +81,23 @@ No critical outage occurred.
 | `EMAIL_TO` | To email address | Optional |
 | `REPORT_TEMPLATE` | Custom template string | Optional |
 | `REPORT_INTERVAL` | Background worker interval | `1h` |
-| `REPORTER_MODE` | `manual` to disable background worker | (auto) |
-| `LOG_LEVEL` | Log level | `info` |
-| `ENVIRONMENT` | Deployment environment | `development` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP gRPC endpoint for Tempo | `tempo:4317` |
+| `REPORTER_MODE` | Set to `manual` to disable background worker | auto |
+| `LOG_LEVEL` | debug, info, warn, error | `info` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Tempo OTLP gRPC endpoint | `tempo:4317` |
 
-## Observability
+## API Endpoints
 
-| Feature | Endpoint/Format |
-|---------|-----------------|
-| **Prometheus Metrics** | `/metrics` — `ReportsGeneratedTotal`, `DeliveryTotal`, `TemplateRenderDuration`, `DBConnectionErrors`, `LastSentTimestamp`, `ReporterRunning` |
-| **Structured JSON Logging** | stdout — trace_id, span_id, service, component, method, path, status_code, duration_ms |
-| **OpenTelemetry Tracing** | OTLP gRPC → Tempo:4317 — W3C TraceContext propagation |
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/healthz` | GET | Health check with DB connectivity |
+| `/ready` | GET | Readiness probe |
+| `/report` | POST | Manual report generation trigger |
+| `/status` | GET | Last sent report info |
+| `/metrics` | GET | Prometheus metrics |
 
-## Database Schema (from pamawas-schema)
+## Custom Templates
 
-```sql
--- Reports table (written by reporter)
-CREATE TABLE IF NOT EXISTS reports (
-    id TEXT PRIMARY KEY,
-    incident_id TEXT NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
-    content TEXT NOT NULL,
-    sent_at TIMESTAMPTZ,
-    channels TEXT[]
-);
-
--- Incidents, evidence (read by reporter)
--- Defined in pamawas-schema migrations
-```
-
-## Current Implementation Status
-
-- ✅ Report generator with template engine (default + custom)
-- ✅ Discord webhook delivery adapter
-- ✅ Telegram Bot API delivery adapter
-- ✅ **Email SMTP delivery adapter (go-mail with STARTTLS, HTML + text)**
-- ✅ Background worker for scheduled reports
-- ✅ Manual trigger endpoint (`/report`)
-- ✅ Health (`/healthz`), readiness (`/ready`), status (`/status`), metrics (`/metrics`)
-- ✅ Concurrent delivery to all configured channels
-- ✅ **Evidence/findings included in daily reports (from `evidence` table)**
-- ✅ Multi-stage Dockerfile (Go 1.26-alpine builder, alpine runtime)
-- ✅ GitHub Actions workflow (main + dev branches, GHCR publishing)
-- ✅ **Prometheus metrics with proper labels**
-- ✅ **Structured JSON logging with zerolog**
-- ✅ **Request/response logging middleware with Loki labels**
-- ✅ **OpenTelemetry tracing (OTLP gRPC → Tempo)**
-- ✅ Viper config management (YAML + ENV)
-
-## Kanban Tasks
-
-- `t_84f79593` — Design report generation and rendering (architect)
-- `t_1ba41fba` — Implement report generator with template engine (backend-dev)
-- `t_a3da3a74` — Implement Discord delivery adapter (backend-dev)
-- `t_0123337f` — Implement Telegram delivery adapter (backend-dev)
-- `t_d90b483d` — Implement Email delivery adapter (backend-dev)
-- `t_929d6b97` — Write unit tests for generation and delivery (qa-dev)
-
-## Dependencies
-
-- **PostgreSQL** — incidents, evidence, reports tables (via pamawas-schema)
-- **pamawas-schema** — Shared types and migrations (parent: `t_d1cdd7a9`)
-- **pamawas-investigator** — Produces evidence/findings to report on
-- **pamawas-scheduler** — Triggers scheduled reports
-- **Discord/Telegram/Email** — External delivery services
-
-## Build & Run
-
-```bash
-# Local development
-go run main.go
-
-# Docker
-docker build -t pamawas-reporter .
-docker run -e DATABASE_URL="postgres://..." \
-  -e DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..." \
-  -e TELEGRAM_BOT_TOKEN="..." \
-  -e TELEGRAM_CHAT_ID="..." \
-  -e EMAIL_SMTP_HOST="smtp.example.com" \
-  -e EMAIL_USERNAME="..." \
-  -e EMAIL_PASSWORD="..." \
-  -e EMAIL_FROM="reporter@example.com" \
-  -e EMAIL_TO="team@example.com" \
-  -p 8080:8080 pamawas-reporter
-
-# Manual report trigger
-curl -X POST http://localhost:8080/report \
-  -H "Content-Type: application/json" \
-  -d '{"source": "manual"}'
-```
-
-## Template Variables
-
-When using custom `REPORT_TEMPLATE`, these variables are available:
+Set `REPORT_TEMPLATE` to override the default. Available variables:
 
 | Variable | Description |
 |----------|-------------|
@@ -184,16 +111,24 @@ When using custom `REPORT_TEMPLATE`, these variables are available:
 | `{{Incidents}}` | Full incident list with evidence |
 | `{{Evidence}}` | Evidence map keyed by incident ID |
 
-## Example Custom Template
+## Observability
 
-```text
-{{Timestamp}} - Infrastructure Report
+| Feature | Endpoint |
+|---------|----------|
+| Prometheus Metrics | `/metrics` — `ReportsGeneratedTotal`, `DeliveryTotal`, `TemplateRenderDuration`, `LastSentTimestamp` |
+| JSON Logging | stdout — trace_id, span_id, service, method, path, status_code, duration_ms |
+| OpenTelemetry | OTLP gRPC → Tempo:4317 |
 
-Health: {{HealthyPercentage}}%
-Incidents: {{TotalIncidents}} ({{NeedsAttention}} active, {{Recovered}} recovered)
+## Building
 
-{{if gt TotalIncidents 0}}
-Root Cause: {{MostLikelyCause}}
-Confidence: {{Confidence}}%
-{{end}}
+```bash
+docker build -t pamawas-reporter .
+go build -o pamawas-reporter main.go
 ```
+
+## Related
+
+- **Root README**: [../README.md](../README.md)
+- **Investigator**: [../pamawas-investigator/README.md](../pamawas-investigator/README.md)
+- **Scheduler**: [../pamawas-scheduler/README.md](../pamawas-scheduler/README.md)
+- **Database Schema**: [../pamawas-schema/README.md](../pamawas-schema/README.md)

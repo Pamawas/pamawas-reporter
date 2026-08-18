@@ -27,20 +27,20 @@ type Handler struct {
 // NewHandler creates a new handler with dependencies
 func NewHandler(db *sql.DB, cfg config.Config, m *metrics.Metrics) *Handler {
 	reporterCfg := service.ReporterConfig{
-		DatabaseURL:        cfg.DatabaseURL,
-		Port:               cfg.Port,
-		DiscordWebhookURL:  cfg.DiscordWebhookURL,
-		TelegramBotToken:   cfg.TelegramBotToken,
-		TelegramChatID:     cfg.TelegramChatID,
-		EmailSMTPHost:      cfg.EmailSMTPHost,
-		EmailSMTPPort:      cfg.EmailSMTPPort,
-		EmailUsername:      cfg.EmailUsername,
-		EmailPassword:      cfg.EmailPassword,
-		EmailFrom:          cfg.EmailFrom,
-		EmailTo:            cfg.EmailTo,
-		ReportTemplate:     cfg.ReportTemplate,
-		ReportInterval:     cfg.ReportInterval,
-		Mode:               cfg.Mode,
+		DatabaseURL:       cfg.DatabaseURL,
+		Port:              cfg.Port,
+		DiscordWebhookURL: cfg.DiscordWebhookURL,
+		TelegramBotToken:  cfg.TelegramBotToken,
+		TelegramChatID:    cfg.TelegramChatID,
+		EmailSMTPHost:     cfg.EmailSMTPHost,
+		EmailSMTPPort:     cfg.EmailSMTPPort,
+		EmailUsername:     cfg.EmailUsername,
+		EmailPassword:     cfg.EmailPassword,
+		EmailFrom:         cfg.EmailFrom,
+		EmailTo:           cfg.EmailTo,
+		ReportTemplate:    cfg.ReportTemplate,
+		ReportInterval:    cfg.ReportInterval,
+		Mode:              cfg.Mode,
 	}
 
 	reporter := service.NewReporter(db, reporterCfg, m)

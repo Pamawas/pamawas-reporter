@@ -18,22 +18,33 @@ import (
 	"github.com/Pamawas/pamawas-reporter/models"
 )
 
+const (
+	// ReportPolicyVersion is the version of the report policy for idempotency
+	ReportPolicyVersion = 1
+
+	// TemplateVersion is the current template version
+	TemplateVersion = "pamawas-report-v1"
+
+	// DefaultTimezone is the default IANA timezone for daily reports
+	DefaultTimezone = "Asia/Jakarta"
+)
+
 // ReporterConfig holds the configuration for the reporter
 type ReporterConfig struct {
-	DatabaseURL        string
-	Port               string
-	DiscordWebhookURL  string
-	TelegramBotToken   string
-	TelegramChatID     string
-	EmailSMTPHost      string
-	EmailSMTPPort      int
-	EmailUsername      string
-	EmailPassword      string
-	EmailFrom          string
-	EmailTo            string
-	ReportTemplate     string
-	ReportInterval     time.Duration
-	Mode               string
+	DatabaseURL       string
+	Port              string
+	DiscordWebhookURL string
+	TelegramBotToken  string
+	TelegramChatID    string
+	EmailSMTPHost     string
+	EmailSMTPPort     int
+	EmailUsername     string
+	EmailPassword     string
+	EmailFrom         string
+	EmailTo           string
+	ReportTemplate    string
+	ReportInterval    time.Duration
+	Mode              string
 }
 
 // Reporter holds the database connection and reporting logic
@@ -64,7 +75,7 @@ func NewReporter(db *sql.DB, cfg ReporterConfig, m *metrics.Metrics) *Reporter {
 	}
 }
 
-// StartWorker starts the background report worker
+// StartWorker starts the background report worker (legacy compatibility)
 func (r *Reporter) StartWorker() {
 	interval := r.config.ReportInterval
 	if interval == 0 {
@@ -87,7 +98,7 @@ func (r *Reporter) StartWorker() {
 	}
 }
 
-// GenerateAndSendDailyReport generates a daily digest report and sends it
+// GenerateAndSendDailyReport generates a daily digest report and sends it (legacy compatibility)
 func (r *Reporter) GenerateAndSendDailyReport() error {
 	r.mu.Lock()
 	if r.running {
@@ -109,9 +120,9 @@ func (r *Reporter) GenerateAndSendDailyReport() error {
 	defer r.wg.Done()
 
 	startTime := time.Now()
-	log.Info().Msg("Generating daily report")
+	log.Info().Msg("Generating daily report (legacy)")
 
-	// Get incidents from the last 24 hours
+	// Get incidents from the last 24 hours (legacy behavior)
 	incidents, err := r.getRecentIncidents(24 * time.Hour)
 	if err != nil {
 		return err
@@ -125,13 +136,13 @@ func (r *Reporter) GenerateAndSendDailyReport() error {
 	// Generate report content
 	reportContent := r.generateDailyReport(incidents)
 
-	// Create report record
+	// Create report record (legacy)
 	report := models.Report{
-		ID:        uuid.NewString(),
+		ID:         uuid.NewString(),
 		IncidentID: "daily_" + time.Now().Format("20060102"),
-		Content:   reportContent,
-		SentAt:    time.Now(),
-		Channels:  []string{"discord", "telegram", "email"},
+		Content:    reportContent,
+		SentAt:     time.Now(),
+		Channels:   []string{"discord", "telegram", "email"},
 	}
 
 	// Send report via configured channels
@@ -153,7 +164,760 @@ func (r *Reporter) GenerateAndSendDailyReport() error {
 	return nil
 }
 
-// getRecentIncidents retrieves incidents from the last duration
+// ProcessReportRequest processes a report request from the scheduler
+func (r *Reporter) ProcessReportRequest(ctx context.Context, payload models.ReportPayload) (*models.ReportResponse, error) {
+	log.Info().
+		Str("request_id", payload.RequestID).
+		Str("report_type", payload.ReportType).
+		Msg("Processing report request")
+
+	// Parse period boundaries
+	periodStart, err := time.Parse(time.RFC3339, payload.PeriodStart)
+	if err != nil {
+		return nil, fmt.Errorf("invalid period_start: %w", err)
+	}
+	periodEnd, err := time.Parse(time.RFC3339, payload.PeriodEnd)
+	if err != nil {
+		return nil, fmt.Errorf("invalid period_end: %w", err)
+	}
+
+	// Check if report request exists and claim it
+	requestID, err := r.claimReportRequest(ctx, payload.RequestID, periodStart, periodEnd, payload.Timezone)
+	if err != nil {
+		return nil, fmt.Errorf("failed to claim report request: %w", err)
+	}
+
+	// Select incidents based on report type
+	var incidentIDs []string
+	var inclusionReasons map[string]string
+
+	switch payload.ReportType {
+	case "daily":
+		incidentIDs, inclusionReasons, err = r.selectDailyIncidents(ctx, periodStart, periodEnd, payload.Timezone)
+		if err != nil {
+			return nil, fmt.Errorf("failed to select daily incidents: %w", err)
+		}
+	case "high_severity":
+		incidentIDs = payload.IncidentIDs
+		inclusionReasons = make(map[string]string)
+		for _, id := range incidentIDs {
+			inclusionReasons[id] = models.InclusionReasonHighSeverityImmediate
+		}
+	default:
+		return nil, fmt.Errorf("unknown report type: %s", payload.ReportType)
+	}
+
+	// Load evidence for all selected incidents
+	incidentEvidence, err := r.loadEvidenceForIncidents(ctx, incidentIDs)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to load evidence for incidents")
+		// Continue with empty evidence rather than failing
+		incidentEvidence = make(map[string][]models.Evidence)
+	}
+
+	// Generate report content
+	reportContent, err := r.generateReportContent(ctx, payload.ReportType, periodStart, periodEnd, payload.Timezone, incidentIDs, incidentEvidence, inclusionReasons)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate report content: %w", err)
+	}
+
+	// Create report record
+	report := models.Report{
+		ID:              uuid.NewString(),
+		RequestID:       requestID,
+		ReportType:      payload.ReportType,
+		PeriodStart:     periodStart,
+		PeriodEnd:       periodEnd,
+		Timezone:        payload.Timezone,
+		TemplateVersion: TemplateVersion,
+		Content:         reportContent,
+		GeneratedAt:     time.Now(),
+		Status:          models.ReportStatusGenerated,
+		CreatedAt:       time.Now(),
+	}
+
+	// Persist report and report_incidents transactionally
+	if err := r.persistReportWithIncidents(ctx, report, incidentIDs, inclusionReasons); err != nil {
+		return nil, fmt.Errorf("failed to persist report: %w", err)
+	}
+
+	// Create pending delivery attempts for configured channels
+	if err := r.createDeliveryAttempts(ctx, report); err != nil {
+		return nil, fmt.Errorf("failed to create delivery attempts: %w", err)
+	}
+
+	// Update report request status to generated
+	if err := r.updateReportRequestStatus(ctx, requestID, "generated", 0, "", nil); err != nil {
+		log.Error().Err(err).Str("request_id", requestID).Msg("Failed to update report request status")
+		// Don't fail the whole operation for this
+	}
+
+	// Send report via configured channels (async)
+	go func() {
+		r.deliverReport(report)
+	}()
+
+	log.Info().
+		Str("report_id", report.ID).
+		Str("request_id", requestID).
+		Int("incident_count", len(incidentIDs)).
+		Msg("Report generated and delivery initiated")
+
+	return &models.ReportResponse{
+		ReportID: report.ID,
+		Status:   report.Status,
+		Message:  "Report generated successfully",
+	}, nil
+}
+
+// claimReportRequest claims a report request for processing
+func (r *Reporter) claimReportRequest(ctx context.Context, requestID string, _periodStart, _periodEnd time.Time, _timezone string) (string, error) {
+	query := `
+		UPDATE report_requests
+		SET status = 'generating',
+		    attempts = attempts + 1,
+		    updated_at = now(),
+		    lease_expires_at = now() + interval '10 minutes'
+		WHERE id = $1
+		  AND status IN ('pending', 'failed_retryable')
+		  AND (lease_expires_at IS NULL OR lease_expires_at < now())
+		RETURNING id
+	`
+
+	var returnedID string
+	err := r.db.QueryRowContext(ctx, query, requestID).Scan(&returnedID)
+	if err == sql.ErrNoRows {
+		// Check if already generated
+		var status string
+		err = r.db.QueryRowContext(ctx, "SELECT status FROM report_requests WHERE id = $1", requestID).Scan(&status)
+		if err == nil && status == "generated" {
+			return "", fmt.Errorf("report request already generated")
+		}
+		return "", fmt.Errorf("report request not available for processing: %w", err)
+	}
+	if err != nil {
+		return "", err
+	}
+
+	return returnedID, nil
+}
+
+// selectDailyIncidents selects incidents for a daily report using lifecycle overlap
+func (r *Reporter) selectDailyIncidents(ctx context.Context, periodStart, periodEnd time.Time, _timezone string) ([]string, map[string]string, error) {
+	// Lifecycle overlap: incident [started_at, COALESCE(resolved_at, infinity)) overlaps [period_start, period_end)
+	query := `
+		SELECT i.id, i.started_at, i.resolved_at, i.status
+		FROM incidents i
+		WHERE i.started_at < $2
+		  AND (i.resolved_at IS NULL OR i.resolved_at > $1)
+		  AND i.status IN ('open', 'investigating', 'resolved', 'suppressed')
+		ORDER BY i.started_at DESC
+	`
+
+	rows, err := r.db.QueryContext(ctx, query, periodStart, periodEnd)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close rows")
+		}
+	}()
+
+	var incidentIDs []string
+	inclusionReasons := make(map[string]string)
+
+	for rows.Next() {
+		var id string
+		var startedAt, resolvedAt time.Time
+		var status string
+		var resolvedAtNull sql.NullTime
+
+		if err := rows.Scan(&id, &startedAt, &resolvedAtNull, &status); err != nil {
+			return nil, nil, err
+		}
+		if resolvedAtNull.Valid {
+			resolvedAt = resolvedAtNull.Time
+		}
+
+		incidentIDs = append(incidentIDs, id)
+
+		// Determine inclusion reason
+		if startedAt.After(periodStart) && startedAt.Before(periodEnd) {
+			inclusionReasons[id] = models.InclusionReasonNewlyStarted
+		} else if (resolvedAtNull.Valid && resolvedAt.After(periodStart) && resolvedAt.Before(periodEnd)) {
+			inclusionReasons[id] = models.InclusionReasonResolvedDuring
+		} else {
+			inclusionReasons[id] = models.InclusionReasonOngoing
+		}
+	}
+
+	return incidentIDs, inclusionReasons, rows.Err()
+}
+
+// loadEvidenceForIncidents loads the latest terminal investigation evidence for each incident
+func (r *Reporter) loadEvidenceForIncidents(ctx context.Context, incidentIDs []string) (map[string][]models.Evidence, error) {
+	if len(incidentIDs) == 0 {
+		return make(map[string][]models.Evidence), nil
+	}
+
+	// Build placeholders for IN clause
+	placeholders := make([]string, len(incidentIDs))
+	args := make([]interface{}, len(incidentIDs))
+	for i, id := range incidentIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+
+	query := "SELECT e.id, e.incident_id, e.type, e.content, e.source, e.confidence,\n" +
+		"       e.supports_evidence, e.contradicts_evidence, e.ordinal\n" +
+		"FROM evidence e\n" +
+		"JOIN investigation_runs ir ON e.run_id = ir.id\n" +
+		"WHERE e.incident_id IN (" + strings.Join(placeholders, ",") + ")\n" +
+		"  AND ir.status = 'completed'\n" +
+		"ORDER BY e.incident_id, ir.completed_at DESC, e.ordinal"
+	// #nosec G202 -- placeholders are parameterized, not user input
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close rows")
+		}
+	}()
+
+	incidentEvidence := make(map[string][]models.Evidence)
+	seenIncidents := make(map[string]bool)
+
+	for rows.Next() {
+		var ev models.Evidence
+		var supportsJSON, contradictsJSON []byte
+		var incidentID string
+
+		if err := rows.Scan(
+			&ev.ID, &incidentID, &ev.Type, &ev.Content, &ev.Source, &ev.Confidence,
+			&supportsJSON, &contradictsJSON, &ev.Ordinal,
+		); err != nil {
+			return nil, err
+		}
+
+		if err := json.Unmarshal(supportsJSON, &ev.Supports); err != nil {
+			ev.Supports = []string{}
+		}
+		if err := json.Unmarshal(contradictsJSON, &ev.Contradicts); err != nil {
+			ev.Contradicts = []string{}
+		}
+
+		// Only take evidence from the latest completed run per incident
+		if !seenIncidents[incidentID] {
+			seenIncidents[incidentID] = true
+			incidentEvidence[incidentID] = []models.Evidence{}
+		}
+		incidentEvidence[incidentID] = append(incidentEvidence[incidentID], ev)
+	}
+
+	return incidentEvidence, rows.Err()
+}
+
+// generateReportContent generates the report content with honest rendering
+func (r *Reporter) generateReportContent(
+	ctx context.Context,
+	reportType string,
+	periodStart, periodEnd time.Time,
+	timezone string,
+	incidentIDs []string,
+	incidentEvidence map[string][]models.Evidence,
+	inclusionReasons map[string]string,
+) (string, error) {
+
+	// Load incident details
+	incidents, err := r.getIncidentsByIDs(ctx, incidentIDs)
+	if err != nil {
+		return "", err
+	}
+
+	var sb strings.Builder
+
+	// Header
+	if reportType == "daily" {
+		fmt.Fprintf(&sb, "📅 Daily Infrastructure Report\n")
+		fmt.Fprintf(&sb, "Period: %s to %s (%s)\n\n",
+			periodStart.In(time.UTC).Format("2006-01-02 15:04:05 UTC"),
+			periodEnd.In(time.UTC).Format("2006-01-02 15:04:05 UTC"),
+			timezone)
+	} else {
+		fmt.Fprintf(&sb, "🚨 High Severity Immediate Report\n")
+		fmt.Fprintf(&sb, "Period: %s to %s (UTC)\n\n",
+			periodStart.In(time.UTC).Format("2006-01-02 15:04:05 UTC"),
+			periodEnd.In(time.UTC).Format("2006-01-02 15:04:05 UTC"))
+	}
+
+	// Summary
+	totalIncidents := len(incidents)
+	needsAttention := 0
+	resolved := 0
+	for _, inc := range incidents {
+		switch inc.Status {
+		case "open", "investigating":
+			needsAttention++
+		case "resolved":
+			resolved++
+		}
+	}
+
+	// Availability - only if we have a real metric
+	availability := r.getAvailabilityMetric(ctx, periodStart, periodEnd)
+	if availability >= 0 {
+		fmt.Fprintf(&sb, "Infrastructure was %.2f%% available during this period.\n", availability)
+	} else {
+		sb.WriteString("Availability: unavailable (no named availability metric configured)\n")
+	}
+
+	fmt.Fprintf(&sb, "%d incidents occurred. %d need attention. %d resolved.\n\n",
+		totalIncidents, needsAttention, resolved)
+
+	// Incident details
+	if len(incidents) > 0 {
+		for _, inc := range incidents {
+			reason := inclusionReasons[inc.ID]
+			reasonLabel := ""
+			switch reason {
+			case models.InclusionReasonNewlyStarted:
+				reasonLabel = " (newly started)"
+			case models.InclusionReasonResolvedDuring:
+				reasonLabel = " (resolved during period)"
+			case models.InclusionReasonOngoing:
+				reasonLabel = " (ongoing)"
+			case models.InclusionReasonHighSeverityImmediate:
+				reasonLabel = " (high severity immediate)"
+			}
+
+			fmt.Fprintf(&sb, "📋 Incident: %s (%s)%s\n", inc.Title, inc.Status, reasonLabel)
+			fmt.Fprintf(&sb, "   ID: %s | Severity: %s | Services: %s\n", inc.ID[:min(8, len(inc.ID))], inc.Severity, strings.Join(inc.AffectedServices, ", "))
+			fmt.Fprintf(&sb, "   Started: %s\n", inc.StartedAt.Format("2006-01-02 15:04:05"))
+			if !inc.ResolvedAt.IsZero() {
+				fmt.Fprintf(&sb, "   Resolved: %s\n", inc.ResolvedAt.Format("2006-01-02 15:04:05"))
+			}
+
+			// Include evidence if available
+			if evList, ok := incidentEvidence[inc.ID]; ok && len(evList) > 0 {
+				sb.WriteString("   🔍 Investigation Findings:\n")
+				for _, ev := range evList {
+					typeIcon := map[string]string{
+						"fact":         "✅",
+						"likely_cause": "🎯",
+						"hypothesis":   "💭",
+						"unknown":      "❓",
+					}[ev.Type]
+					if typeIcon == "" {
+						typeIcon = "📝"
+					}
+					fmt.Fprintf(&sb, "      %s [%s] (%.0f%%) %s\n", typeIcon, strings.ToUpper(ev.Type), ev.Confidence*100, ev.Content)
+				}
+			} else {
+				sb.WriteString("   🔍 Investigation Findings: investigation unavailable\n")
+			}
+			sb.WriteString("\n")
+		}
+	} else {
+		sb.WriteString("No incidents detected.\n\n")
+	}
+
+	fmt.Fprintf(&sb, "---\nTemplate: %s | Generated: %s\n", TemplateVersion, time.Now().UTC().Format("2006-01-02 15:04:05 UTC"))
+
+	return sb.String(), nil
+}
+
+// getIncidentsByIDs loads incident details by IDs
+func (r *Reporter) getIncidentsByIDs(ctx context.Context, incidentIDs []string) ([]models.Incident, error) {
+	if len(incidentIDs) == 0 {
+		return []models.Incident{}, nil
+	}
+
+	placeholders := make([]string, len(incidentIDs))
+	args := make([]interface{}, len(incidentIDs))
+	for i, id := range incidentIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+
+	query := "SELECT id, title, status, started_at, resolved_at, severity, affected_services\n" +
+		"FROM incidents\n" +
+		"WHERE id IN (" + strings.Join(placeholders, ",") + ")\n" +
+		"ORDER BY started_at DESC"
+	// #nosec G202 -- placeholders are parameterized, not user input
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close rows")
+		}
+	}()
+
+	var incidents []models.Incident
+	for rows.Next() {
+		var inc models.Incident
+		var affectedServicesJSON []byte
+		var resolvedAt sql.NullTime
+
+		if err := rows.Scan(
+			&inc.ID, &inc.Title, &inc.Status, &inc.StartedAt, &resolvedAt,
+			&inc.Severity, &affectedServicesJSON,
+		); err != nil {
+			return nil, err
+		}
+		if resolvedAt.Valid {
+			inc.ResolvedAt = resolvedAt.Time
+		}
+		if err := json.Unmarshal(affectedServicesJSON, &inc.AffectedServices); err != nil {
+			inc.AffectedServices = []string{}
+		}
+		incidents = append(incidents, inc)
+	}
+
+	return incidents, rows.Err()
+}
+
+// getAvailabilityMetric returns the availability percentage if a named metric exists, -1 otherwise
+func (r *Reporter) getAvailabilityMetric(ctx context.Context, periodStart, periodEnd time.Time) float64 {
+	// For MVP, we don't have a configured availability metric
+	// This would query Prometheus for a specific availability metric
+	// Return -1 to indicate unavailable
+	return -1
+}
+
+// persistReportWithIncidents persists the report and report_incidents in a transaction
+func (r *Reporter) persistReportWithIncidents(ctx context.Context, report models.Report, incidentIDs []string, inclusionReasons map[string]string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil {
+				log.Error().Err(rbErr).Msg("Failed to rollback transaction")
+			}
+		}
+	}()
+
+	// Insert report
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO reports (id, request_id, report_type, period_start, period_end, timezone, template_version, content, generated_at, status, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`, report.ID, report.RequestID, report.ReportType, report.PeriodStart, report.PeriodEnd,
+		report.Timezone, report.TemplateVersion, report.Content, report.GeneratedAt, report.Status, report.CreatedAt)
+	if err != nil {
+		return err
+	}
+
+	// Insert report_incidents
+	for _, incidentID := range incidentIDs {
+		reason := inclusionReasons[incidentID]
+		if reason == "" {
+			reason = models.InclusionReasonOngoing
+		}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO report_incidents (report_id, incident_id, inclusion_reason)
+			VALUES ($1, $2, $3)
+		`, report.ID, incidentID, reason)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// createDeliveryAttempts creates pending delivery attempts for each configured channel
+func (r *Reporter) createDeliveryAttempts(ctx context.Context, report models.Report) error {
+	channels := []struct {
+		name           string
+		destinationKey string
+		enabled        bool
+	}{
+		{"discord", r.config.DiscordWebhookURL, r.config.DiscordWebhookURL != ""},
+		{"telegram", r.config.TelegramChatID, r.config.TelegramBotToken != "" && r.config.TelegramChatID != ""},
+		{"email", r.config.EmailTo, r.config.EmailSMTPHost != "" && r.config.EmailUsername != "" && r.config.EmailPassword != ""},
+	}
+
+	for _, ch := range channels {
+		if !ch.enabled {
+			continue
+		}
+
+		attempt := models.DeliveryAttempt{
+			ID:             uuid.NewString(),
+			ReportID:       report.ID,
+			Channel:        ch.name,
+			DestinationKey: ch.destinationKey,
+			Status:         models.DeliveryStatusPending,
+			Attempts:       0,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		}
+
+		_, err := r.db.ExecContext(ctx, `
+			INSERT INTO delivery_attempts (id, report_id, channel, destination_key, status, attempts, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`, attempt.ID, attempt.ReportID, attempt.Channel, attempt.DestinationKey,
+			attempt.Status, attempt.Attempts, attempt.CreatedAt, attempt.UpdatedAt)
+		if err != nil {
+			return fmt.Errorf("failed to create delivery attempt for %s: %w", ch.name, err)
+		}
+	}
+
+	return nil
+}
+
+// deliverReport delivers the report via all configured channels
+func (r *Reporter) deliverReport(report models.Report) {
+	ctx := context.Background()
+
+	channels := []struct {
+		name           string
+		sendFunc       func(context.Context, models.Report) error
+		destinationKey string
+	}{
+		{"discord", r.sendToDiscord, r.config.DiscordWebhookURL},
+		{"telegram", r.sendToTelegram, r.config.TelegramChatID},
+		{"email", r.sendToEmail, r.config.EmailTo},
+	}
+
+	var wg sync.WaitGroup
+	for _, ch := range channels {
+		if ch.destinationKey == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(channel string, sendFn func(context.Context, models.Report) error, destKey string) {
+			defer wg.Done()
+			r.deliverChannel(ctx, report, channel, sendFn, destKey)
+		}(ch.name, ch.sendFunc, ch.destinationKey)
+	}
+
+	wg.Wait()
+
+	// Update report status based on delivery attempts
+	r.updateReportDeliveryStatus(ctx, report.ID)
+}
+
+// deliverChannel delivers a report via a single channel with retry logic
+func (r *Reporter) deliverChannel(ctx context.Context, report models.Report, channel string, sendFn func(context.Context, models.Report) error, destinationKey string) {
+	maxAttempts := 3
+	baseDelay := 10 * time.Second
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Claim the delivery attempt
+		attemptID, err := r.claimDeliveryAttempt(ctx, report.ID, channel, destinationKey)
+		if err != nil {
+			log.Error().Err(err).Str("channel", channel).Str("report_id", report.ID).Msg("Failed to claim delivery attempt")
+			return
+		}
+
+		// Update status to sending
+		if updateErr := r.updateDeliveryAttemptStatus(ctx, attemptID, models.DeliveryStatusSending, attempt, "", nil); updateErr != nil {
+			log.Error().Err(updateErr).Str("channel", channel).Str("report_id", report.ID).Msg("Failed to update delivery attempt status")
+			return
+		}
+
+		// Send the report
+		err = sendFn(ctx, report)
+
+		if err == nil {
+			// Success
+			if updateErr := r.updateDeliveryAttemptStatus(ctx, attemptID, models.DeliveryStatusSent, attempt, "", nil); updateErr != nil {
+				log.Error().Err(updateErr).Str("channel", channel).Str("report_id", report.ID).Msg("Failed to update delivery attempt status")
+			}
+			log.Info().Str("channel", channel).Str("report_id", report.ID).Msg("Report delivered successfully")
+			return
+		}
+
+		// Check if error is retryable
+		if r.isRetryableError(err) && attempt < maxAttempts {
+			// Schedule retry
+			delay := baseDelay * time.Duration(attempt)
+			nextAttempt := time.Now().Add(delay)
+			if updateErr := r.updateDeliveryAttemptStatus(ctx, attemptID, models.DeliveryStatusRetryable, attempt, "", &nextAttempt); updateErr != nil {
+				log.Error().Err(updateErr).Str("channel", channel).Str("report_id", report.ID).Msg("Failed to update delivery attempt status")
+			}
+			log.Warn().Err(err).Str("channel", channel).Str("report_id", report.ID).Int("attempt", attempt).Msg("Delivery failed, will retry")
+			time.Sleep(delay)
+			continue
+		}
+
+		// Terminal failure
+		safeErrorCode := r.classifyError(err)
+		if updateErr := r.updateDeliveryAttemptStatus(ctx, attemptID, models.DeliveryStatusFailedTerminal, attempt, safeErrorCode, nil); updateErr != nil {
+			log.Error().Err(updateErr).Str("channel", channel).Str("report_id", report.ID).Msg("Failed to update delivery attempt status")
+		}
+		log.Error().Err(err).Str("channel", channel).Str("report_id", report.ID).Str("safe_error_code", safeErrorCode).Msg("Delivery failed terminally")
+		return
+	}
+}
+
+// claimDeliveryAttempt claims a pending delivery attempt for processing
+func (r *Reporter) claimDeliveryAttempt(ctx context.Context, reportID, channel, destinationKey string) (string, error) {
+	query := `
+		UPDATE delivery_attempts
+		SET status = 'sending',
+		    attempts = attempts + 1,
+		    updated_at = now(),
+		    lease_expires_at = now() + interval '5 minutes'
+		WHERE report_id = $1 AND channel = $2 AND destination_key = $3
+		  AND status IN ('pending', 'retryable')
+		  AND (lease_expires_at IS NULL OR lease_expires_at < now())
+		RETURNING id
+	`
+
+	var attemptID string
+	err := r.db.QueryRowContext(ctx, query, reportID, channel, destinationKey).Scan(&attemptID)
+	if err == sql.ErrNoRows {
+		// Check if already sent
+		var status string
+		err = r.db.QueryRowContext(ctx, `
+			SELECT status FROM delivery_attempts WHERE report_id = $1 AND channel = $2 AND destination_key = $3
+		`, reportID, channel, destinationKey).Scan(&status)
+		if err == nil && status == "sent" {
+			return "", fmt.Errorf("delivery already completed")
+		}
+		return "", fmt.Errorf("delivery attempt not available: %w", err)
+	}
+	return attemptID, err
+}
+
+// updateDeliveryAttemptStatus updates the status of a delivery attempt
+func (r *Reporter) updateDeliveryAttemptStatus(ctx context.Context, attemptID, status string, attempts int, safeErrorCode string, nextAttemptAt *time.Time) error {
+	query := `
+		UPDATE delivery_attempts
+		SET status = $1,
+		    attempts = $2,
+		    safe_error_code = $3,
+		    next_attempt_at = $4,
+		    updated_at = now()
+		WHERE id = $5
+	`
+	_, err := r.db.ExecContext(ctx, query, status, attempts, safeErrorCode, nextAttemptAt, attemptID)
+	return err
+}
+
+// updateReportDeliveryStatus updates the report status based on delivery attempts
+func (r *Reporter) updateReportDeliveryStatus(ctx context.Context, reportID string) {
+	query := `
+		SELECT status FROM delivery_attempts WHERE report_id = $1
+	`
+	rows, err := r.db.QueryContext(ctx, query, reportID)
+	if err != nil {
+		log.Error().Err(err).Str("report_id", reportID).Msg("Failed to query delivery attempts")
+		return
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close rows")
+		}
+	}()
+
+	allSent := true
+	anySent := false
+	anyPending := false
+	var status string
+
+	for rows.Next() {
+		var scanStatus string
+		if scanErr := rows.Scan(&scanStatus); scanErr != nil {
+			continue
+		}
+		status = scanStatus
+		switch status {
+		case "sent":
+			anySent = true
+		case "pending", "sending", "retryable":
+			allSent = false
+			anyPending = true
+		case "failed_terminal":
+			allSent = false
+		}
+	}
+	
+	if rowsErr := rows.Err(); rowsErr != nil {
+		log.Error().Err(rowsErr).Str("report_id", reportID).Msg("Error iterating delivery attempts")
+		return
+	}
+
+	var newStatus string
+	if allSent && anySent {
+		newStatus = models.ReportStatusDelivered
+	} else if anySent && (anyPending || !allSent) {
+		newStatus = models.ReportStatusPartiallyDelivered
+	} else if !anySent {
+		newStatus = models.ReportStatusDeliveryFailed
+	} else {
+		newStatus = models.ReportStatusGenerated
+	}
+
+	_, err = r.db.ExecContext(ctx, `
+		UPDATE reports SET status = $1 WHERE id = $2
+	`, newStatus, reportID)
+	if err != nil {
+		log.Error().Err(err).Str("report_id", reportID).Msg("Failed to update report status")
+	}
+}
+
+// updateReportRequestStatus updates the report request status
+func (r *Reporter) updateReportRequestStatus(ctx context.Context, requestID, status string, attempts int, safeErrorCode string, nextAttemptAt *time.Time) error {
+	query := `
+		UPDATE report_requests
+		SET status = $1,
+		    attempts = $2,
+		    safe_error_code = $3,
+		    next_attempt_at = $4,
+		    updated_at = now(),
+		    lease_expires_at = NULL
+		WHERE id = $5
+	`
+	_, err := r.db.ExecContext(ctx, query, status, attempts, safeErrorCode, nextAttemptAt, requestID)
+	return err
+}
+
+// isRetryableError determines if an error is retryable
+func (r *Reporter) isRetryableError(err error) bool {
+	errStr := strings.ToLower(err.Error())
+	// Network errors, timeouts, 429, 5xx are retryable
+	return strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "connection") ||
+		strings.Contains(errStr, "network") ||
+		strings.Contains(errStr, "502") ||
+		strings.Contains(errStr, "503") ||
+		strings.Contains(errStr, "504") ||
+		strings.Contains(errStr, "429")
+}
+
+// classifyError classifies an error into a safe error code
+func (r *Reporter) classifyError(err error) string {
+	errStr := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(errStr, "timeout"):
+		return "timeout"
+	case strings.Contains(errStr, "connection refused"):
+		return "connection_refused"
+	case strings.Contains(errStr, "429"):
+		return "rate_limited"
+	case strings.Contains(errStr, "502") || strings.Contains(errStr, "503") || strings.Contains(errStr, "504"):
+		return "upstream_error"
+	case strings.Contains(errStr, "401") || strings.Contains(errStr, "403"):
+		return "auth_failed"
+	case strings.Contains(errStr, "certificate") || strings.Contains(errStr, "tls"):
+		return "cert_error"
+	default:
+		return "unknown_error"
+	}
+}
+
+// getRecentIncidents retrieves incidents from the last duration (legacy)
 func (r *Reporter) getRecentIncidents(duration time.Duration) ([]models.Incident, error) {
 	since := time.Now().Add(-duration)
 
@@ -178,11 +942,16 @@ func (r *Reporter) getRecentIncidents(duration time.Duration) ([]models.Incident
 	for rows.Next() {
 		var inc models.Incident
 		var affectedServicesJSON []byte
+		var resolvedAt sql.NullTime
+
 		if err := rows.Scan(
-			&inc.ID, &inc.Title, &inc.Status, &inc.StartedAt, &inc.ResolvedAt,
+			&inc.ID, &inc.Title, &inc.Status, &inc.StartedAt, &resolvedAt,
 			&inc.Severity, &affectedServicesJSON,
 		); err != nil {
 			return nil, err
+		}
+		if resolvedAt.Valid {
+			inc.ResolvedAt = resolvedAt.Time
 		}
 		if err := json.Unmarshal(affectedServicesJSON, &inc.AffectedServices); err != nil {
 			return nil, err
@@ -192,7 +961,7 @@ func (r *Reporter) getRecentIncidents(duration time.Duration) ([]models.Incident
 	return incidents, rows.Err()
 }
 
-// getEvidenceForIncident retrieves evidence findings for a specific incident
+// getEvidenceForIncident retrieves evidence findings for a specific incident (legacy)
 func (r *Reporter) getEvidenceForIncident(incidentID string) ([]models.Evidence, error) {
 	query := `
 		SELECT id, incident_id, type, content, source, confidence
@@ -222,7 +991,7 @@ func (r *Reporter) getEvidenceForIncident(incidentID string) ([]models.Evidence,
 	return evidenceList, rows.Err()
 }
 
-// generateDailyReport creates a formatted daily digest report
+// generateDailyReport creates a formatted daily digest report (legacy)
 func (r *Reporter) generateDailyReport(incidents []models.Incident) string {
 	renderStart := time.Now()
 	defer func() {
@@ -295,10 +1064,10 @@ func (r *Reporter) generateDailyReport(incidents []models.Incident) string {
 				sb.WriteString("   🔍 Investigation Findings:\n")
 				for _, ev := range evList {
 					typeIcon := map[string]string{
-						"fact":          "✅",
-						"likely_cause":  "🎯",
-						"hypothesis":    "💭",
-						"unknown":       "❓",
+						"fact":         "✅",
+						"likely_cause": "🎯",
+						"hypothesis":   "💭",
+						"unknown":      "❓",
 					}[ev.Type]
 					if typeIcon == "" {
 						typeIcon = "📝"
@@ -316,18 +1085,19 @@ func (r *Reporter) generateDailyReport(incidents []models.Incident) string {
 	return sb.String()
 }
 
-// sendReport sends the report via configured channels
+// sendReport sends the report via configured channels (legacy)
 func (r *Reporter) sendReport(report models.Report) error {
 	var wg sync.WaitGroup
 	var errMutex sync.Mutex
 	var firstError error
+	ctx := context.Background()
 
 	// Discord
 	if r.config.DiscordWebhookURL != "" {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := r.sendToDiscord(report); err != nil {
+			if err := r.sendToDiscord(ctx, report); err != nil {
 				errMutex.Lock()
 				if firstError == nil {
 					firstError = err
@@ -347,7 +1117,7 @@ func (r *Reporter) sendReport(report models.Report) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := r.sendToTelegram(report); err != nil {
+			if err := r.sendToTelegram(ctx, report); err != nil {
 				errMutex.Lock()
 				if firstError == nil {
 					firstError = err
@@ -367,7 +1137,7 @@ func (r *Reporter) sendReport(report models.Report) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := r.sendToEmail(report); err != nil {
+			if err := r.sendToEmail(ctx, report); err != nil {
 				errMutex.Lock()
 				if firstError == nil {
 					firstError = err
@@ -387,13 +1157,13 @@ func (r *Reporter) sendReport(report models.Report) error {
 }
 
 // sendToDiscord sends the report to Discord via webhook
-func (r *Reporter) sendToDiscord(report models.Report) error {
+func (r *Reporter) sendToDiscord(ctx context.Context, report models.Report) error {
 	if r.config.DiscordWebhookURL == "" {
 		return nil
 	}
 
 	payload := map[string]interface{}{
-		"content": report.Content,
+		"content":  report.Content,
 		"username": "Pamawas Reporter",
 	}
 	payloadBytes, err := json.Marshal(payload)
@@ -425,7 +1195,7 @@ func (r *Reporter) sendToDiscord(report models.Report) error {
 }
 
 // sendToTelegram sends the report to Telegram via Bot API
-func (r *Reporter) sendToTelegram(report models.Report) error {
+func (r *Reporter) sendToTelegram(ctx context.Context, report models.Report) error {
 	if r.config.TelegramBotToken == "" || r.config.TelegramChatID == "" {
 		return nil
 	}
@@ -465,7 +1235,7 @@ func (r *Reporter) sendToTelegram(report models.Report) error {
 }
 
 // sendToEmail sends the report via SMTP
-func (r *Reporter) sendToEmail(report models.Report) error {
+func (r *Reporter) sendToEmail(_ context.Context, report models.Report) error {
 	if r.config.EmailSMTPHost == "" || r.config.EmailUsername == "" || r.config.EmailPassword == "" {
 		return nil
 	}
@@ -501,10 +1271,10 @@ func (r *Reporter) sendToEmail(report models.Report) error {
 	msg.SetBodyString(mail.TypeTextHTML, htmlBody)
 
 	// Send email with context
-	ctx, cancel := context.WithTimeout(r.ctx, 10*time.Second)
+	emailCtx, cancel := context.WithTimeout(r.ctx, 10*time.Second)
 	defer cancel()
 
-	if err := client.DialAndSendWithContext(ctx, msg); err != nil {
+	if err := client.DialAndSendWithContext(emailCtx, msg); err != nil {
 		return fmt.Errorf("failed to send email: %w", err)
 	}
 
@@ -512,7 +1282,7 @@ func (r *Reporter) sendToEmail(report models.Report) error {
 	return nil
 }
 
-// saveReport saves the report to database
+// saveReport saves the report to database (legacy)
 func (r *Reporter) saveReport(report models.Report) error {
 	channelsJSON, err := json.Marshal(report.Channels)
 	if err != nil {

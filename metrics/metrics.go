@@ -7,12 +7,12 @@ import (
 
 // Metrics holds all Prometheus metrics for the reporter service
 type Metrics struct {
-	ReportsGeneratedTotal   prometheus.Counter
-	DeliveryTotal           *prometheus.CounterVec
-	TemplateRenderDuration  prometheus.Histogram
-	DBConnectionErrors      prometheus.Counter
-	LastSentTimestamp       prometheus.Gauge
-	ReporterRunning         prometheus.Gauge
+	ReportsGeneratedTotal  prometheus.Counter
+	DeliveryTotal          *prometheus.CounterVec
+	TemplateRenderDuration prometheus.Histogram
+	DBConnectionErrors     prometheus.Counter
+	LastSentTimestamp      prometheus.Gauge
+	ReporterRunning        prometheus.Gauge
 }
 
 // NewMetrics creates and registers all metrics

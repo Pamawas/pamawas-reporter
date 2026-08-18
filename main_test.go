@@ -69,7 +69,7 @@ func TestReporter_SendToDiscord(t *testing.T) {
 
 	// We can't actually send, but we can verify the payload structure
 	payload := map[string]interface{}{
-		"content": report.Content,
+		"content":  report.Content,
 		"username": "Pamawas Reporter",
 	}
 
