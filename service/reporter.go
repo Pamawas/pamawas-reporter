@@ -345,7 +345,7 @@ func (r *Reporter) selectDailyIncidents(ctx context.Context, periodStart, period
 		// Determine inclusion reason
 		if startedAt.After(periodStart) && startedAt.Before(periodEnd) {
 			inclusionReasons[id] = models.InclusionReasonNewlyStarted
-		} else if (resolvedAtNull.Valid && resolvedAt.After(periodStart) && resolvedAt.Before(periodEnd)) {
+		} else if resolvedAtNull.Valid && resolvedAt.After(periodStart) && resolvedAt.Before(periodEnd) {
 			inclusionReasons[id] = models.InclusionReasonResolvedDuring
 		} else {
 			inclusionReasons[id] = models.InclusionReasonOngoing
@@ -842,7 +842,7 @@ func (r *Reporter) updateReportDeliveryStatus(ctx context.Context, reportID stri
 			allSent = false
 		}
 	}
-	
+
 	if rowsErr := rows.Err(); rowsErr != nil {
 		log.Error().Err(rowsErr).Str("report_id", reportID).Msg("Error iterating delivery attempts")
 		return
@@ -998,12 +998,8 @@ func (r *Reporter) generateDailyReport(incidents []models.Incident) string {
 		r.metrics.TemplateRenderDuration.Observe(time.Since(renderStart).Seconds())
 	}()
 
-	var healthyPercentage float64
-	if len(incidents) > 0 {
-		healthyPercentage = 99.97 // placeholder
-	} else {
-		healthyPercentage = 100.0
-	}
+	// Don't fabricate a health percentage without a named metric and denominator
+	// Per normative contract: "Never generate an availability percentage without a named metric and denominator"
 
 	needsAttention := 0
 	recovered := 0
@@ -1030,13 +1026,12 @@ func (r *Reporter) generateDailyReport(incidents []models.Incident) string {
 	// Build report using template or default format
 	if r.config.ReportTemplate != "" {
 		data := map[string]interface{}{
-			"HealthyPercentage": healthyPercentage,
-			"TotalIncidents":    len(incidents),
-			"NeedsAttention":    needsAttention,
-			"Recovered":         recovered,
-			"Incidents":         incidents,
-			"Evidence":          incidentEvidence,
-			"Timestamp":         time.Now().Format("2006-01-02 15:04:05"),
+			"TotalIncidents": len(incidents),
+			"NeedsAttention": needsAttention,
+			"Recovered":      recovered,
+			"Incidents":      incidents,
+			"Evidence":       incidentEvidence,
+			"Timestamp":      time.Now().Format("2006-01-02 15:04:05"),
 		}
 
 		content := r.config.ReportTemplate
@@ -1049,7 +1044,6 @@ func (r *Reporter) generateDailyReport(incidents []models.Incident) string {
 	// Default report format with evidence
 	var sb strings.Builder
 	sb.WriteString("🌅 Good morning.\n\n")
-	fmt.Fprintf(&sb, "Infrastructure was %.2f%% healthy overnight.\n", healthyPercentage)
 	fmt.Fprintf(&sb, "%d incidents occurred. %d needs your attention. %d recovered automatically.\n\n",
 		len(incidents), needsAttention, recovered)
 
@@ -1081,7 +1075,7 @@ func (r *Reporter) generateDailyReport(incidents []models.Incident) string {
 		sb.WriteString("No incidents detected.\n\n")
 	}
 
-	sb.WriteString("No critical outage occurred.\n")
+	// Removed fabricated "No critical outage occurred" claim
 	return sb.String()
 }
 
