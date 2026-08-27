@@ -440,32 +440,11 @@ func (r *Reporter) generateReportContent(
 
 	var sb strings.Builder
 
-	// Header
-	if reportType == "daily" {
-		fmt.Fprintf(&sb, "📅 Daily Infrastructure Report\n")
-		fmt.Fprintf(&sb, "Period: %s to %s (%s)\n\n",
-			periodStart.In(time.UTC).Format("2006-01-02 15:04:05 UTC"),
-			periodEnd.In(time.UTC).Format("2006-01-02 15:04:05 UTC"),
-			timezone)
-	} else {
-		fmt.Fprintf(&sb, "🚨 High Severity Immediate Report\n")
-		fmt.Fprintf(&sb, "Period: %s to %s (UTC)\n\n",
-			periodStart.In(time.UTC).Format("2006-01-02 15:04:05 UTC"),
-			periodEnd.In(time.UTC).Format("2006-01-02 15:04:05 UTC"))
-	}
+	writeReportHeader(&sb, reportType, periodStart, periodEnd, timezone)
 
 	// Summary
 	totalIncidents := len(incidents)
-	needsAttention := 0
-	resolved := 0
-	for _, inc := range incidents {
-		switch inc.Status {
-		case "open", "investigating":
-			needsAttention++
-		case "resolved":
-			resolved++
-		}
-	}
+	needsAttention, resolved := countIncidentStatuses(incidents)
 
 	// Availability - only if we have a real metric
 	availability := r.getAvailabilityMetric(ctx, periodStart, periodEnd)
@@ -479,55 +458,104 @@ func (r *Reporter) generateReportContent(
 		totalIncidents, needsAttention, resolved)
 
 	// Incident details
-	if len(incidents) > 0 {
-		for _, inc := range incidents {
-			reason := inclusionReasons[inc.ID]
-			reasonLabel := ""
-			switch reason {
-			case models.InclusionReasonNewlyStarted:
-				reasonLabel = " (newly started)"
-			case models.InclusionReasonResolvedDuring:
-				reasonLabel = " (resolved during period)"
-			case models.InclusionReasonOngoing:
-				reasonLabel = " (ongoing)"
-			case models.InclusionReasonHighSeverityImmediate:
-				reasonLabel = " (high severity immediate)"
-			}
-
-			fmt.Fprintf(&sb, "📋 Incident: %s (%s)%s\n", inc.Title, inc.Status, reasonLabel)
-			fmt.Fprintf(&sb, "   ID: %s | Severity: %s | Services: %s\n", inc.ID[:min(8, len(inc.ID))], inc.Severity, strings.Join(inc.AffectedServices, ", "))
-			fmt.Fprintf(&sb, "   Started: %s\n", inc.StartedAt.Format("2006-01-02 15:04:05"))
-			if !inc.ResolvedAt.IsZero() {
-				fmt.Fprintf(&sb, "   Resolved: %s\n", inc.ResolvedAt.Format("2006-01-02 15:04:05"))
-			}
-
-			// Include evidence if available
-			if evList, ok := incidentEvidence[inc.ID]; ok && len(evList) > 0 {
-				sb.WriteString("   🔍 Investigation Findings:\n")
-				for _, ev := range evList {
-					typeIcon := map[string]string{
-						"fact":         "✅",
-						"likely_cause": "🎯",
-						"hypothesis":   "💭",
-						"unknown":      "❓",
-					}[ev.Type]
-					if typeIcon == "" {
-						typeIcon = "📝"
-					}
-					fmt.Fprintf(&sb, "      %s [%s] (%.0f%%) %s\n", typeIcon, strings.ToUpper(ev.Type), ev.Confidence*100, ev.Content)
-				}
-			} else {
-				sb.WriteString("   🔍 Investigation Findings: investigation unavailable\n")
-			}
-			sb.WriteString("\n")
-		}
-	} else {
-		sb.WriteString("No incidents detected.\n\n")
-	}
+	writeIncidentDetails(&sb, incidents, incidentEvidence, inclusionReasons)
 
 	fmt.Fprintf(&sb, "---\nTemplate: %s | Generated: %s\n", TemplateVersion, time.Now().UTC().Format("2006-01-02 15:04:05 UTC"))
 
 	return sb.String(), nil
+}
+
+// writeReportHeader writes the report title and period header based on type.
+func writeReportHeader(sb *strings.Builder, reportType string, periodStart, periodEnd time.Time, timezone string) {
+	utcStart := periodStart.In(time.UTC).Format("2006-01-02 15:04:05 UTC")
+	utcEnd := periodEnd.In(time.UTC).Format("2006-01-02 15:04:05 UTC")
+	if reportType == "daily" {
+		fmt.Fprintf(sb, "📅 Daily Infrastructure Report\n")
+		fmt.Fprintf(sb, "Period: %s to %s (%s)\n\n", utcStart, utcEnd, timezone)
+	} else {
+		fmt.Fprintf(sb, "🚨 High Severity Immediate Report\n")
+		fmt.Fprintf(sb, "Period: %s to %s (UTC)\n\n", utcStart, utcEnd)
+	}
+}
+
+// countIncidentStatuses counts how many incidents need attention vs are resolved.
+func countIncidentStatuses(incidents []models.Incident) (needsAttention, resolved int) {
+	for _, inc := range incidents {
+		switch inc.Status {
+		case "open", "investigating":
+			needsAttention++
+		case "resolved":
+			resolved++
+		}
+	}
+	return needsAttention, resolved
+}
+
+// writeIncidentDetails writes a formatted block for each incident including
+// its evidence findings.
+func writeIncidentDetails(sb *strings.Builder, incidents []models.Incident, incidentEvidence map[string][]models.Evidence, inclusionReasons map[string]string) {
+	if len(incidents) == 0 {
+		sb.WriteString("No incidents detected.\n\n")
+		return
+	}
+	for _, inc := range incidents {
+		reasonLabel := inclusionReasonLabel(inclusionReasons[inc.ID])
+		fmt.Fprintf(sb, "📋 Incident: %s (%s)%s\n", inc.Title, inc.Status, reasonLabel)
+		fmt.Fprintf(sb, "   ID: %s | Severity: %s | Services: %s\n", inc.ID[:min(8, len(inc.ID))], inc.Severity, strings.Join(inc.AffectedServices, ", "))
+		fmt.Fprintf(sb, "   Started: %s\n", inc.StartedAt.Format("2006-01-02 15:04:05"))
+		if !inc.ResolvedAt.IsZero() {
+			fmt.Fprintf(sb, "   Resolved: %s\n", inc.ResolvedAt.Format("2006-01-02 15:04:05"))
+		}
+
+		writeEvidence(sb, incidentEvidence[inc.ID])
+
+		sb.WriteString("\n")
+	}
+}
+
+// inclusionReasonLabel returns a human-readable suffix for the given inclusion
+// reason, or an empty string if the reason is unknown.
+func inclusionReasonLabel(reason string) string {
+	switch reason {
+	case models.InclusionReasonNewlyStarted:
+		return " (newly started)"
+	case models.InclusionReasonResolvedDuring:
+		return " (resolved during period)"
+	case models.InclusionReasonOngoing:
+		return " (ongoing)"
+	case models.InclusionReasonHighSeverityImmediate:
+		return " (high severity immediate)"
+	}
+	return ""
+}
+
+// writeEvidence writes the investigation findings for an incident, or a notice
+// that no investigation was available.
+func writeEvidence(sb *strings.Builder, evList []models.Evidence) {
+	if len(evList) == 0 {
+		sb.WriteString("   🔍 Investigation Findings: investigation unavailable\n")
+		return
+	}
+	sb.WriteString("   🔍 Investigation Findings:\n")
+	for _, ev := range evList {
+		fmt.Fprintf(sb, "      %s [%s] (%.0f%%) %s\n",
+			evidenceIcon(ev.Type), strings.ToUpper(ev.Type), ev.Confidence*100, ev.Content)
+	}
+}
+
+// evidenceIcon returns the emoji icon for a given evidence type.
+func evidenceIcon(evType string) string {
+	switch evType {
+	case "fact":
+		return "✅"
+	case "likely_cause":
+		return "🎯"
+	case "hypothesis":
+		return "💭"
+	case "unknown":
+		return "❓"
+	}
+	return "📝"
 }
 
 // getIncidentsByIDs loads incident details by IDs
