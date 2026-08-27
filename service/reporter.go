@@ -31,20 +31,21 @@ const (
 
 // ReporterConfig holds the configuration for the reporter
 type ReporterConfig struct {
-	DatabaseURL       string
-	Port              string
-	DiscordWebhookURL string
-	TelegramBotToken  string
-	TelegramChatID    string
-	EmailSMTPHost     string
-	EmailSMTPPort     int
-	EmailUsername     string
-	EmailPassword     string
-	EmailFrom         string
-	EmailTo           string
-	ReportTemplate    string
-	ReportInterval    time.Duration
-	Mode              string
+	DatabaseURL            string
+	Port                   string
+	DiscordWebhookURL      string
+	TelegramBotToken       string
+	TelegramChatID         string
+	TelegramAPIBaseURL     string
+	EmailSMTPHost          string
+	EmailSMTPPort          int
+	EmailUsername          string
+	EmailPassword          string
+	EmailFrom              string
+	EmailTo                string
+	ReportTemplate         string
+	ReportInterval         time.Duration
+	Mode                   string
 }
 
 // Reporter holds the database connection and reporting logic
@@ -1222,7 +1223,11 @@ func (r *Reporter) sendToTelegram(ctx context.Context, report models.Report) err
 		return nil
 	}
 
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", r.config.TelegramBotToken)
+	telegramBase := r.config.TelegramAPIBaseURL
+	if telegramBase == "" {
+		telegramBase = "https://api.telegram.org"
+	}
+	url := fmt.Sprintf("%s/bot%s/sendMessage", telegramBase, r.config.TelegramBotToken)
 	payload := map[string]interface{}{
 		"chat_id":    r.config.TelegramChatID,
 		"text":       report.Content,

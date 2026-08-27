@@ -32,6 +32,7 @@ func NewHandler(db *sql.DB, cfg config.Config, m *metrics.Metrics) *Handler {
 		DiscordWebhookURL: cfg.DiscordWebhookURL,
 		TelegramBotToken:  cfg.TelegramBotToken,
 		TelegramChatID:    cfg.TelegramChatID,
+		TelegramAPIBaseURL: cfg.TelegramAPIBaseURL,
 		EmailSMTPHost:     cfg.EmailSMTPHost,
 		EmailSMTPPort:     cfg.EmailSMTPPort,
 		EmailUsername:     cfg.EmailUsername,

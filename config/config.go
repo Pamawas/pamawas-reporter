@@ -15,6 +15,7 @@ type Config struct {
 	DiscordWebhookURL string
 	TelegramBotToken  string
 	TelegramChatID    string
+	TelegramAPIBaseURL string
 	EmailSMTPHost     string
 	EmailSMTPPort     int
 	EmailUsername     string
@@ -63,6 +64,7 @@ func Load() Config {
 		DiscordWebhookURL: v.GetString("discord_webhook_url"),
 		TelegramBotToken:  v.GetString("telegram_bot_token"),
 		TelegramChatID:    v.GetString("telegram_chat_id"),
+		TelegramAPIBaseURL: v.GetString("telegram_api_base_url"),
 		EmailSMTPHost:     v.GetString("email_smtp_host"),
 		EmailSMTPPort:     v.GetInt("email_smtp_port"),
 		EmailUsername:     v.GetString("email_username"),
