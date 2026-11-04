@@ -37,6 +37,9 @@ func Load() Config {
 	v.SetEnvPrefix("PAMAWAS_REPORTER")
 	v.AutomaticEnv()
 
+	// Also bind standard env var names (without prefix)
+	v.BindEnv("database_url", "DATABASE_URL")
+
 	// Defaults
 	v.SetDefault("port", "8080")
 	v.SetDefault("log_level", "info")
@@ -77,7 +80,7 @@ func Load() Config {
 	}
 
 	if cfg.DatabaseURL == "" {
-		panic("DATABASE_URL not set (config file or PAMAWAS_REPORTER_DATABASE_URL env var)")
+		panic("DATABASE_URL not set (config file or PAMAWAS_REPORTER_DATABASE_URL / DATABASE_URL env var)")
 	}
 	return cfg
 }
