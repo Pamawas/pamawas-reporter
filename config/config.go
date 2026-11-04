@@ -35,11 +35,58 @@ func Load() Config {
 	v.AddConfigPath("./config")
 	v.AddConfigPath("/etc/pamawas/")
 	v.SetEnvPrefix("PAMAWAS_REPORTER")
-	v.AutomaticEnv()
-
-	// Also bind standard env var names (without prefix)
+	// Don't use AutomaticEnv() - Kubernetes injects PAMAWAS_REPORTER_PORT=tcp://IP:PORT
+	// which would override our config. Explicitly bind only what we need.
 	if err := v.BindEnv("database_url", "DATABASE_URL"); err != nil {
 		panic(fmt.Sprintf("failed to bind DATABASE_URL env: %v", err))
+	}
+	if err := v.BindEnv("port", "PORT"); err != nil {
+		panic(fmt.Sprintf("failed to bind PORT env: %v", err))
+	}
+	if err := v.BindEnv("log_level", "LOG_LEVEL"); err != nil {
+		panic(fmt.Sprintf("failed to bind LOG_LEVEL env: %v", err))
+	}
+	if err := v.BindEnv("environment", "ENVIRONMENT"); err != nil {
+		panic(fmt.Sprintf("failed to bind ENVIRONMENT env: %v", err))
+	}
+	if err := v.BindEnv("discord_webhook_url", "DISCORD_WEBHOOK_URL"); err != nil {
+		panic(fmt.Sprintf("failed to bind DISCORD_WEBHOOK_URL env: %v", err))
+	}
+	if err := v.BindEnv("telegram_bot_token", "TELEGRAM_BOT_TOKEN"); err != nil {
+		panic(fmt.Sprintf("failed to bind TELEGRAM_BOT_TOKEN env: %v", err))
+	}
+	if err := v.BindEnv("telegram_chat_id", "TELEGRAM_CHAT_ID"); err != nil {
+		panic(fmt.Sprintf("failed to bind TELEGRAM_CHAT_ID env: %v", err))
+	}
+	if err := v.BindEnv("telegram_api_base_url", "TELEGRAM_API_BASE_URL"); err != nil {
+		panic(fmt.Sprintf("failed to bind TELEGRAM_API_BASE_URL env: %v", err))
+	}
+	if err := v.BindEnv("email_smtp_host", "EMAIL_SMTP_HOST"); err != nil {
+		panic(fmt.Sprintf("failed to bind EMAIL_SMTP_HOST env: %v", err))
+	}
+	if err := v.BindEnv("email_smtp_port", "EMAIL_SMTP_PORT"); err != nil {
+		panic(fmt.Sprintf("failed to bind EMAIL_SMTP_PORT env: %v", err))
+	}
+	if err := v.BindEnv("email_username", "EMAIL_USERNAME"); err != nil {
+		panic(fmt.Sprintf("failed to bind EMAIL_USERNAME env: %v", err))
+	}
+	if err := v.BindEnv("email_password", "EMAIL_PASSWORD"); err != nil {
+		panic(fmt.Sprintf("failed to bind EMAIL_PASSWORD env: %v", err))
+	}
+	if err := v.BindEnv("email_from", "EMAIL_FROM"); err != nil {
+		panic(fmt.Sprintf("failed to bind EMAIL_FROM env: %v", err))
+	}
+	if err := v.BindEnv("email_to", "EMAIL_TO"); err != nil {
+		panic(fmt.Sprintf("failed to bind EMAIL_TO env: %v", err))
+	}
+	if err := v.BindEnv("report_template", "REPORT_TEMPLATE"); err != nil {
+		panic(fmt.Sprintf("failed to bind REPORT_TEMPLATE env: %v", err))
+	}
+	if err := v.BindEnv("report_interval", "REPORT_INTERVAL"); err != nil {
+		panic(fmt.Sprintf("failed to bind REPORT_INTERVAL env: %v", err))
+	}
+	if err := v.BindEnv("mode", "REPORTER_MODE"); err != nil {
+		panic(fmt.Sprintf("failed to bind REPORTER_MODE env: %v", err))
 	}
 
 	// Defaults
