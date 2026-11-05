@@ -20,9 +20,6 @@ import (
 	"github.com/Pamawas/pamawas-reporter/otel"
 )
 
-// version is set at build time via -ldflags
-var version = "dev"
-
 func main() {
 	cfg := config.Load()
 	initLogger(cfg)
