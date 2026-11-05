@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,25 +134,28 @@ func TestReadyHandler(t *testing.T) {
 	})
 }
 
-func TestReportHandlerNoIncidents(t *testing.T) {
-	h, mock := newTestHandler(t)
-	mock.ExpectQuery("SELECT i.id").WillReturnRows(sqlmock.NewRows([]string{"id", "title", "status", "started_at", "resolved_at", "severity", "affected_services"}))
+func TestReportHandlerInvalidBody(t *testing.T) {
+	h, _ := newTestHandler(t)
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/report", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/reports", nil)
 	h.ReportHandler(rr, req)
-	if rr.Code != http.StatusAccepted || rr.Body.String() != "{\"message\":\"Daily report triggered successfully\"}\n" {
-		t.Fatalf("response = %d %q", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
 	}
 }
 
 func TestReportHandlerDatabaseError(t *testing.T) {
 	h, mock := newTestHandler(t)
-	mock.ExpectQuery("SELECT i.id").WillReturnError(errors.New("query failed"))
+	// claimReportRequest issues UPDATE report_requests ... RETURNING id (no row),
+	// then falls back to SELECT status FROM report_requests (also no row) and errors.
+	mock.ExpectQuery("UPDATE report_requests").WithArgs("rreq_x").WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery("SELECT status FROM report_requests").WithArgs("rreq_x").WillReturnRows(sqlmock.NewRows([]string{"status"}))
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/report", nil)
+	body := `{"contract_version":1,"request_id":"rreq_x","report_type":"daily","period_start":"2026-08-16T00:00:00Z","period_end":"2026-08-17T00:00:00Z","timezone":"Asia/Jakarta","incident_ids":[]}`
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/reports", strings.NewReader(body))
 	h.ReportHandler(rr, req)
 	if rr.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d", rr.Code)
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusInternalServerError)
 	}
 }
 

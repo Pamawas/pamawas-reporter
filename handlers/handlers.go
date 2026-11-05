@@ -118,7 +118,9 @@ func (h *Handler) ReadyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ReportHandler handles manual report generation
+// ReportHandler handles typed report requests from the scheduler.
+// The frozen v1 contract (POST /api/v1/reports) carries a JSON ReportPayload;
+// the legacy untyped daily trigger is no longer exposed on this route.
 func (h *Handler) ReportHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodPost {
@@ -126,16 +128,21 @@ func (h *Handler) ReportHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.reporter.GenerateAndSendDailyReport(); err != nil {
+	var payload models.ReportPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	resp, err := h.reporter.ProcessReportRequest(r.Context(), payload)
+	if err != nil {
 		http.Error(w, fmt.Sprintf("Report generation failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	w.WriteHeader(http.StatusAccepted)
-	if err := json.NewEncoder(w).Encode(models.TriggerResponse{
-		Message: "Daily report triggered successfully",
-	}); err != nil {
-		log.Error().Err(err).Msg("Failed to encode trigger response")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Error().Err(err).Msg("Failed to encode report response")
 	}
 }
 
