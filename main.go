@@ -96,8 +96,8 @@ func main() {
 	r.HandleFunc("/healthz", h.HealthHandler)
 	r.HandleFunc("/ready", h.ReadyHandler)
 
-	// V1 API endpoints under /api/v1
-	r.HandleFunc("/api/v1/report", h.ReportHandler)
+	// V1 API endpoints
+	r.HandleFunc("/api/v1/reports", h.ReportHandler)
 	r.HandleFunc("/api/v1/status", h.StatusHandler)
 	registerMetricsRoutes(r, h.MetricsHandler())
 
