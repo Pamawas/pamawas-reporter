@@ -16,6 +16,13 @@ import (
 	"github.com/Pamawas/pamawas-reporter/service"
 )
 
+// writeJSON encodes v as JSON to w, logging any error.
+func writeJSON(w http.ResponseWriter, v interface{}) {
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Error().Err(err).Msg("failed to encode JSON response")
+	}
+}
+
 // Handler holds dependencies for HTTP handlers
 type Handler struct {
 	reporter *service.Reporter
@@ -65,7 +72,7 @@ func (h *Handler) HealthHandler(w http.ResponseWriter, r *http.Request) {
 		h.metrics.DBConnectionErrors.Inc()
 		log.Error().Err(err).Msg("Health check failed: database connection")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(models.HealthResponse{Status: "unhealthy", Error: fmt.Sprintf("Database connection failed: %v", err)})
+		writeJSON(w, models.HealthResponse{Status: "unhealthy", Error: fmt.Sprintf("Database connection failed: %v", err)})
 		return
 	}
 	h.reporter.MuLock()
@@ -73,7 +80,7 @@ func (h *Handler) HealthHandler(w http.ResponseWriter, r *http.Request) {
 	running := h.reporter.Running()
 	h.reporter.MuUnlock()
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(models.HealthResponse{Status: "healthy", Timestamp: time.Now().UTC(), LastSent: lastSent, Running: running, Version: "1.0.0"})
+	writeJSON(w, models.HealthResponse{Status: "healthy", Timestamp: time.Now().UTC(), LastSent: lastSent, Running: running, Version: "1.0.0"})
 }
 
 // ReadyHandler handles readiness check requests
@@ -86,11 +93,11 @@ func (h *Handler) ReadyHandler(w http.ResponseWriter, r *http.Request) {
 	if err := h.db.PingContext(r.Context()); err != nil {
 		log.Error().Err(err).Msg("Readiness check failed: database not ready")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(models.ReadyResponse{Status: "not ready", Error: fmt.Sprintf("Database not ready: %v", err)})
+		writeJSON(w, models.ReadyResponse{Status: "not ready", Error: fmt.Sprintf("Database not ready: %v", err)})
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(models.ReadyResponse{Status: "ready"})
+	writeJSON(w, models.ReadyResponse{Status: "ready"})
 }
 
 // ReportHandler handles typed report requests from the scheduler.
@@ -111,7 +118,7 @@ func (h *Handler) ReportHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, resp)
 }
 
 // StatusHandler returns the current status of the reporter
@@ -123,7 +130,7 @@ func (h *Handler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	h.reporter.MuLock()
 	defer h.reporter.MuUnlock()
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"last_sent": h.reporter.LastSent(),
 		"running":   h.reporter.Running(),
 		"uptime":    time.Since(h.reporter.StartTime()).String(),
