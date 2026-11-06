@@ -5,14 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
 
 	"github.com/Pamawas/pamawas-reporter/config"
-	"github.com/Pamawas/pamawas-reporter/fetcher"
 	"github.com/Pamawas/pamawas-reporter/metrics"
 	"github.com/Pamawas/pamawas-reporter/models"
 	"github.com/Pamawas/pamawas-reporter/service"
@@ -20,45 +18,39 @@ import (
 
 // Handler holds dependencies for HTTP handlers
 type Handler struct {
-	reporter       *service.Reporter
-	cfg            config.Config
-	metrics        *metrics.Metrics
-	db             *sql.DB
-	metricsFetcher fetcher.MetricsFetcher
-	logsFetcher    fetcher.LogsFetcher
+	reporter *service.Reporter
+	cfg      config.Config
+	metrics  *metrics.Metrics
+	db       *sql.DB
 }
 
-// NewHandler creates a new handler with dependencies and fetcher implementations.
-func NewHandler(db *sql.DB, cfg config.Config, m *metrics.Metrics, mf fetcher.MetricsFetcher, lf fetcher.LogsFetcher) *Handler {
+// NewHandler creates a new handler with dependencies.
+func NewHandler(db *sql.DB, cfg config.Config, m *metrics.Metrics) *Handler {
 	reporterCfg := service.ReporterConfig{
-		DatabaseURL:         cfg.DatabaseURL,
-		Port:                cfg.Port,
-		DiscordWebhookURL:   cfg.DiscordWebhookURL,
-		TelegramBotToken:    cfg.TelegramBotToken,
-		TelegramChatID:      cfg.TelegramChatID,
-		TelegramAPIBaseURL:  cfg.TelegramAPIBaseURL,
-		EmailSMTPHost:       cfg.EmailSMTPHost,
-		EmailSMTPPort:       cfg.EmailSMTPPort,
-		EmailUsername:       cfg.EmailUsername,
-		EmailPassword:       cfg.EmailPassword,
-		EmailFrom:           cfg.EmailFrom,
-		EmailTo:             cfg.EmailTo,
-		ReportTemplate:      cfg.ReportTemplate,
-		ReportInterval:      cfg.ReportInterval,
-		Mode:                cfg.Mode,
+		DatabaseURL:       cfg.DatabaseURL,
+		Port:              cfg.Port,
+		DiscordWebhookURL: cfg.DiscordWebhookURL,
+		TelegramBotToken:  cfg.TelegramBotToken,
+		TelegramChatID:    cfg.TelegramChatID,
+		TelegramAPIBaseURL: cfg.TelegramAPIBaseURL,
+		EmailSMTPHost:     cfg.EmailSMTPHost,
+		EmailSMTPPort:     cfg.EmailSMTPPort,
+		EmailUsername:     cfg.EmailUsername,
+		EmailPassword:     cfg.EmailPassword,
+		EmailFrom:         cfg.EmailFrom,
+		EmailTo:           cfg.EmailTo,
+		ReportTemplate:    cfg.ReportTemplate,
+		ReportInterval:    cfg.ReportInterval,
+		Mode:              cfg.Mode,
 	}
 
 	reporter := service.NewReporter(db, reporterCfg, m)
-	reporter.SetMetricsFetcher(mf)
-	reporter.SetLogsFetcher(lf)
 
 	return &Handler{
-		reporter:       reporter,
-		cfg:            cfg,
-		metrics:        m,
-		db:             db,
-		metricsFetcher: mf,
-		logsFetcher:    lf,
+		reporter: reporter,
+		cfg:      cfg,
+		metrics:  m,
+		db:       db,
 	}
 }
 
@@ -142,32 +134,6 @@ func (h *Handler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 // MetricsHandler returns the Prometheus metrics handler
 func (h *Handler) MetricsHandler() http.Handler {
 	return promhttp.Handler()
-}
-
-// RefreshEvidenceHandler enriches evidence for a given incident ID.
-func (h *Handler) RefreshEvidenceHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	// Expected path: /incidents/{id}/evidence/refresh
-	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) != 4 || parts[0] != "incidents" || parts[2] != "evidence" || parts[3] != "refresh" {
-		http.Error(w, "Invalid URL", http.StatusBadRequest)
-		return
-	}
-	incidentID := parts[1]
-	// Simple auth placeholder - check for pamawas:incident:write scope
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") == "" {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if err := h.reporter.EnrichEvidence(r.Context(), incidentID); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to enrich evidence: %v", err), http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // Reporter returns the reporter instance

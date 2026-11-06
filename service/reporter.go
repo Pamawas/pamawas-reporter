@@ -17,7 +17,6 @@ import (
 
 	"github.com/Pamawas/pamawas-reporter/metrics"
 	"github.com/Pamawas/pamawas-reporter/models"
-	"github.com/Pamawas/pamawas-reporter/fetcher"
 )
 
 const (
@@ -52,19 +51,17 @@ type ReporterConfig struct {
 
 // Reporter holds the database connection and reporting logic
 type Reporter struct {
-	db            *sql.DB
-	config        ReporterConfig
-	metrics       *metrics.Metrics
-	httpClient    *http.Client
-	mu            sync.Mutex
-	lastSent      time.Time
-	running       bool
-	wg            sync.WaitGroup
-	ctx           context.Context
-	cancelFunc    context.CancelFunc
-	startTime     time.Time
-	metricsFetcher fetcher.MetricsFetcher
-	logsFetcher    fetcher.LogsFetcher
+	db         *sql.DB
+	config     ReporterConfig
+	metrics    *metrics.Metrics
+	httpClient *http.Client
+	mu         sync.Mutex
+	lastSent   time.Time
+	running    bool
+	wg         sync.WaitGroup
+	ctx        context.Context
+	cancelFunc context.CancelFunc
+	startTime  time.Time
 }
 
 // NewReporter creates a new reporter instance
@@ -78,16 +75,6 @@ func NewReporter(db *sql.DB, cfg ReporterConfig, m *metrics.Metrics) *Reporter {
 		cancelFunc: func() {},
 		startTime:  time.Now(),
 	}
-}
-
-// SetMetricsFetcher sets the metrics fetcher for evidence enrichment.
-func (r *Reporter) SetMetricsFetcher(mf fetcher.MetricsFetcher) {
-	r.metricsFetcher = mf
-}
-
-// SetLogsFetcher sets the logs fetcher for evidence enrichment.
-func (r *Reporter) SetLogsFetcher(lf fetcher.LogsFetcher) {
-	r.logsFetcher = lf
 }
 
 // StartWorker starts the background report worker (legacy compatibility)
@@ -1367,192 +1354,4 @@ func (r *Reporter) StartTime() time.Time {
 func (r *Reporter) Stop() {
 	r.cancelFunc()
 	r.wg.Wait()
-}
-
-// EnrichEvidence fetches metrics and logs for an incident and updates the evidence record.
-// It uses optimistic concurrency control via the evidence.version column.
-func (r *Reporter) EnrichEvidence(ctx context.Context, incidentID string) error {
-	// Fetch latest evidence record for the incident (from latest completed investigation run)
-	const query = `
-		SELECT e.id, e.version, e.metrics, e.logs
-		FROM evidence e
-		JOIN investigation_runs ir ON e.run_id = ir.id
-		WHERE e.incident_id = $1
-		  AND ir.status = 'completed'
-		ORDER BY ir.completed_at DESC
-		LIMIT 1
-	`
-
-	var evidenceID string
-	var version int
-	var metricsJSON, logsJSON []byte
-
-	err := r.db.QueryRowContext(ctx, query, incidentID).Scan(&evidenceID, &version, &metricsJSON, &logsJSON)
-	if err == sql.ErrNoRows {
-		// No evidence to enrich - this is not an error
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("failed to fetch evidence: %w", err)
-	}
-
-	var existingMetrics []models.Metric
-	var existingLogs []models.LogEntry
-	if len(metricsJSON) > 0 {
-		if err := json.Unmarshal(metricsJSON, &existingMetrics); err != nil {
-			return fmt.Errorf("failed to unmarshal existing metrics: %w", err)
-		}
-	}
-	if len(logsJSON) > 0 {
-		if err := json.Unmarshal(logsJSON, &existingLogs); err != nil {
-			return fmt.Errorf("failed to unmarshal existing logs: %w", err)
-		}
-	}
-
-	// Fetch new metrics if fetcher is available
-	var newMetrics []models.Metric
-	if r.metricsFetcher != nil {
-		start := time.Now()
-		fetchedMetrics, err := r.metricsFetcher.Fetch(ctx, incidentID)
-		r.metrics.FetchDuration.WithLabelValues("metrics").Observe(time.Since(start).Seconds())
-		if err != nil {
-			log.Error().Err(err).Str("incident_id", incidentID).Msg("Failed to fetch metrics")
-		} else {
-			newMetrics = convertFetcherMetricsToModels(fetchedMetrics)
-		}
-	}
-
-	// Fetch new logs if fetcher is available
-	var newLogs []models.LogEntry
-	if r.logsFetcher != nil {
-		start := time.Now()
-		fetchedLogs, err := r.logsFetcher.Fetch(ctx, incidentID)
-		r.metrics.FetchDuration.WithLabelValues("logs").Observe(time.Since(start).Seconds())
-		if err != nil {
-			log.Error().Err(err).Str("incident_id", incidentID).Msg("Failed to fetch logs")
-		} else {
-			newLogs = convertFetcherLogsToModels(fetchedLogs)
-		}
-	}
-
-	// Merge: append new metrics/logs to existing (avoiding duplicates by Name+Labels+At for metrics, Timestamp+Line for logs)
-	mergedMetrics := mergeMetrics(existingMetrics, newMetrics)
-	mergedLogs := mergeLogs(existingLogs, newLogs)
-
-	// Marshal merged data
-	mergedMetricsJSON, err := json.Marshal(mergedMetrics)
-	if err != nil {
-		return fmt.Errorf("failed to marshal merged metrics: %w", err)
-	}
-	mergedLogsJSON, err := json.Marshal(mergedLogs)
-	if err != nil {
-		return fmt.Errorf("failed to marshal merged logs: %w", err)
-	}
-
-	// Persist with optimistic concurrency
-	return r.persistEvidence(ctx, evidenceID, version, mergedMetricsJSON, mergedLogsJSON)
-}
-
-// persistEvidence updates the evidence record with optimistic concurrency control.
-func (r *Reporter) persistEvidence(ctx context.Context, evidenceID string, expectedVersion int, metricsJSON, logsJSON []byte) error {
-	query := `
-		UPDATE evidence
-		SET metrics = $1, logs = $2, version = version + 1, updated_at = now()
-		WHERE id = $3 AND version = $4
-	`
-	result, err := r.db.ExecContext(ctx, query, metricsJSON, logsJSON, evidenceID, expectedVersion)
-	if err != nil {
-		return fmt.Errorf("failed to update evidence: %w", err)
-	}
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-	if rowsAffected == 0 {
-		return fmt.Errorf("optimistic concurrency conflict: evidence was modified by another process")
-	}
-	return nil
-}
-
-// mergeMetrics merges new metrics into existing, avoiding duplicates.
-func mergeMetrics(existing, new []models.Metric) []models.Metric {
-	seen := make(map[string]bool)
-	result := make([]models.Metric, 0, len(existing)+len(new))
-
-	key := func(m models.Metric) string {
-		labels := ""
-		for k, v := range m.Labels {
-			labels += k + "=" + v + ","
-		}
-		return fmt.Sprintf("%s|%s|%s", m.Name, labels, m.At.Format(time.RFC3339))
-	}
-
-	for _, m := range existing {
-		k := key(m)
-		if !seen[k] {
-			seen[k] = true
-			result = append(result, m)
-		}
-	}
-	for _, m := range new {
-		k := key(m)
-		if !seen[k] {
-			seen[k] = true
-			result = append(result, m)
-		}
-	}
-	return result
-}
-
-// mergeLogs merges new logs into existing, avoiding duplicates.
-func mergeLogs(existing, new []models.LogEntry) []models.LogEntry {
-	seen := make(map[string]bool)
-	result := make([]models.LogEntry, 0, len(existing)+len(new))
-
-	key := func(l models.LogEntry) string {
-		return fmt.Sprintf("%s|%s", l.Timestamp.Format(time.RFC3339), l.Line)
-	}
-
-	for _, l := range existing {
-		k := key(l)
-		if !seen[k] {
-			seen[k] = true
-			result = append(result, l)
-		}
-	}
-	for _, l := range new {
-		k := key(l)
-		if !seen[k] {
-			seen[k] = true
-			result = append(result, l)
-		}
-	}
-	return result
-}
-
-// convertFetcherMetricsToModels converts fetcher.Metric slice to models.Metric slice.
-func convertFetcherMetricsToModels(metrics []fetcher.Metric) []models.Metric {
-	result := make([]models.Metric, 0, len(metrics))
-	for _, m := range metrics {
-		result = append(result, models.Metric{
-			Name:   m.Name,
-			Value:  m.Value,
-			Labels: m.Labels,
-			At:     m.At,
-		})
-	}
-	return result
-}
-
-// convertFetcherLogsToModels converts fetcher.LogEntry slice to models.LogEntry slice.
-func convertFetcherLogsToModels(logs []fetcher.LogEntry) []models.LogEntry {
-	result := make([]models.LogEntry, 0, len(logs))
-	for _, l := range logs {
-		result = append(result, models.LogEntry{
-			Timestamp: l.Timestamp,
-			Stream:    l.Stream,
-			Line:      l.Line,
-		})
-	}
-	return result
 }

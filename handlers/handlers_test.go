@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -16,7 +15,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/Pamawas/pamawas-reporter/config"
-	"github.com/Pamawas/pamawas-reporter/fetcher"
 	"github.com/Pamawas/pamawas-reporter/metrics"
 	"github.com/Pamawas/pamawas-reporter/models"
 )
@@ -44,7 +42,7 @@ func newTestHandler(t *testing.T) (*Handler, sqlmock.Sqlmock) {
 			t.Logf("Failed to close database: %v", closeErr)
 		}
 	})
-	return NewHandler(db, config.Config{ReportInterval: time.Hour}, handlerMetrics(), &fetcher.NoOpMetricsFetcher{}, &fetcher.NoOpLogsFetcher{}), mock
+	return NewHandler(db, config.Config{ReportInterval: time.Hour}, handlerMetrics()), mock
 }
 
 func TestNewHandlerExposesReporter(t *testing.T) {
@@ -179,49 +177,5 @@ func TestStatusAndMetricsHandlers(t *testing.T) {
 	}
 	if h.MetricsHandler() == nil {
 		t.Fatal("MetricsHandler returned nil")
-	}
-}
-
-func TestRefreshEvidenceHandlerWrongMethod(t *testing.T) {
-	h, _ := newTestHandler(t)
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/incidents/abc123/evidence/refresh", nil)
-	h.RefreshEvidenceHandler(rr, req)
-	if rr.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusMethodNotAllowed)
-	}
-}
-
-func TestRefreshEvidenceHandlerUnauthorized(t *testing.T) {
-	h, _ := newTestHandler(t)
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/incidents/abc123/evidence/refresh", nil)
-	h.RefreshEvidenceHandler(rr, req)
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
-	}
-}
-
-func TestRefreshEvidenceHandlerInvalidURL(t *testing.T) {
-	h, _ := newTestHandler(t)
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/incidents/abc123/evidence", nil)
-	req.Header.Set("Authorization", "Bearer test-token")
-	h.RefreshEvidenceHandler(rr, req)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
-	}
-}
-
-func TestRefreshEvidenceHandlerSuccess(t *testing.T) {
-	h, mock := newTestHandler(t)
-	mock.ExpectQuery("SELECT e.id, e.version, e.metrics, e.logs").WillReturnError(sql.ErrNoRows) // No evidence to enrich
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/incidents/test-incident-id/evidence/refresh", nil)
-	req.Header.Set("Authorization", "Bearer valid-token")
-	h.RefreshEvidenceHandler(rr, req)
-	// Returns 204 No Content even when no evidence found (not an error)
-	if rr.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNoContent)
 	}
 }

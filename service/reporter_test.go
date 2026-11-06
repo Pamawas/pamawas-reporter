@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -15,7 +14,6 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/Pamawas/pamawas-reporter/fetcher"
 	"github.com/Pamawas/pamawas-reporter/metrics"
 	"github.com/Pamawas/pamawas-reporter/models"
 )
@@ -225,99 +223,5 @@ func TestGenerateAndSendDailyReportAlreadyRunning(t *testing.T) {
 	r.running = true
 	if err := r.GenerateAndSendDailyReport(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-// Mock fetchers for testing
-type mockMetricsFetcher struct {
-	Metrics []fetcher.Metric
-	Err     error
-}
-
-func (m *mockMetricsFetcher) Fetch(ctx context.Context, incidentID string) ([]fetcher.Metric, error) {
-	return m.Metrics, m.Err
-}
-
-type mockLogsFetcher struct {
-	Logs []fetcher.LogEntry
-	Err  error
-}
-
-func (l *mockLogsFetcher) Fetch(ctx context.Context, incidentID string) ([]fetcher.LogEntry, error) {
-	return l.Logs, l.Err
-}
-
-func TestEnrichEvidenceNoEvidence(t *testing.T) {
-	r, mock := newMockReporter(t, ReporterConfig{})
-	r.SetMetricsFetcher(&mockMetricsFetcher{})
-	r.SetLogsFetcher(&mockLogsFetcher{})
-	mock.ExpectQuery("SELECT e.id, e.version, e.metrics, e.logs").
-		WithArgs("incident-123").
-		WillReturnError(sql.ErrNoRows)
-	err := r.EnrichEvidence(context.Background(), "incident-123")
-	if err != nil {
-		t.Fatalf("EnrichEvidence() error = %v", err)
-	}
-}
-
-func TestEnrichEvidenceWithMetrics(t *testing.T) {
-	r, mock := newMockReporter(t, ReporterConfig{})
-	// Initialize proper metrics with FetchDuration histogram
-	r.metrics = &metrics.Metrics{
-		ReportsGeneratedTotal:  prometheus.NewCounter(prometheus.CounterOpts{Name: "test_reports_total"}),
-		DeliveryTotal:          prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_delivery_total"}, []string{"channel", "status"}),
-		TemplateRenderDuration: prometheus.NewHistogram(prometheus.HistogramOpts{Name: "test_render_seconds"}),
-		DBConnectionErrors:     prometheus.NewCounter(prometheus.CounterOpts{Name: "test_db_errors_total"}),
-		LastSentTimestamp:      prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_last_sent"}),
-		ReporterRunning:        prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_running"}),
-		FetchDuration:          prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "pamawas_fetch_duration_seconds"}, []string{"type"}),
-	}
-
-	mockMetrics := &mockMetricsFetcher{
-		Metrics: []fetcher.Metric{
-			{Name: "http_requests_total", Value: 42.5, Labels: map[string]string{"method": "GET"}, At: time.Now()},
-		},
-	}
-	r.SetMetricsFetcher(mockMetrics)
-	r.SetLogsFetcher(&mockLogsFetcher{})
-
-	mock.ExpectQuery("SELECT e.id, e.version, e.metrics, e.logs").
-		WithArgs("incident-123").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "version", "metrics", "logs"}).
-			AddRow("evidence-1", 0, "[]", "[]"))
-	mock.ExpectExec("UPDATE evidence").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-
-	err := r.EnrichEvidence(context.Background(), "incident-123")
-	if err != nil {
-		t.Fatalf("EnrichEvidence() error = %v", err)
-	}
-}
-
-func TestMergeMetricsDeduplication(t *testing.T) {
-	existing := []models.Metric{
-		{Name: "http_requests", Value: 1, Labels: map[string]string{"method": "GET"}, At: time.Now().Add(-time.Hour)},
-	}
-	newMetrics := []models.Metric{
-		{Name: "http_requests", Value: 1, Labels: map[string]string{"method": "GET"}, At: time.Now().Add(-time.Hour)}, // duplicate
-		{Name: "cpu_usage", Value: 50.0, Labels: map[string]string{}, At: time.Now()},
-	}
-	merged := mergeMetrics(existing, newMetrics)
-	if len(merged) != 2 {
-		t.Fatalf("mergeMetrics() returned %d metrics, want 2", len(merged))
-	}
-}
-
-func TestMergeLogsDeduplication(t *testing.T) {
-	existing := []models.LogEntry{
-		{Timestamp: time.Now().Add(-time.Hour), Stream: "app", Line: "Request completed"},
-	}
-	newLogs := []models.LogEntry{
-		{Timestamp: time.Now().Add(-time.Hour), Stream: "app", Line: "Request completed"}, // duplicate
-		{Timestamp: time.Now(), Stream: "app", Line: "New log"},
-	}
-	merged := mergeLogs(existing, newLogs)
-	if len(merged) != 2 {
-		t.Fatalf("mergeLogs() returned %d logs, want 2", len(merged))
 	}
 }
