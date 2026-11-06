@@ -551,6 +551,21 @@ func evidenceIcon(evType string) string {
 	return "📝"
 }
 
+func parseAffectedServices(raw []byte) ([]string, error) {
+	if len(raw) == 0 {
+		return []string{}, nil
+	}
+	var arr pq.StringArray
+	if err := arr.Scan(raw); err == nil {
+		return []string(arr), nil
+	}
+	var result []string
+	if err := json.Unmarshal(raw, &result); err == nil {
+		return result, nil
+	}
+	return nil, fmt.Errorf("invalid affected_services format: %s", string(raw))
+}
+
 // getIncidentsByIDs loads incident details by IDs
 func (r *Reporter) getIncidentsByIDs(ctx context.Context, incidentIDs []string) ([]models.Incident, error) {
 	if len(incidentIDs) == 0 {
@@ -575,21 +590,23 @@ ORDER BY started_at DESC`
 	var incidents []models.Incident
 	for rows.Next() {
 		var inc models.Incident
-		var affectedServicesJSON []byte
+		var rawServices []byte
 		var resolvedAt sql.NullTime
 
 		if err := rows.Scan(
 			&inc.ID, &inc.Title, &inc.Status, &inc.StartedAt, &resolvedAt,
-			&inc.Severity, &affectedServicesJSON,
+			&inc.Severity, &rawServices,
 		); err != nil {
 			return nil, err
 		}
 		if resolvedAt.Valid {
 			inc.ResolvedAt = resolvedAt.Time
 		}
-		if err := json.Unmarshal(affectedServicesJSON, &inc.AffectedServices); err != nil {
-			inc.AffectedServices = []string{}
+		services, parseErr := parseAffectedServices(rawServices)
+		if parseErr != nil {
+			return nil, parseErr
 		}
+		inc.AffectedServices = services
 		incidents = append(incidents, inc)
 	}
 
@@ -954,21 +971,23 @@ func (r *Reporter) getRecentIncidents(duration time.Duration) ([]models.Incident
 	var incidents []models.Incident
 	for rows.Next() {
 		var inc models.Incident
-		var affectedServicesJSON []byte
+		var rawServices []byte
 		var resolvedAt sql.NullTime
 
 		if err := rows.Scan(
 			&inc.ID, &inc.Title, &inc.Status, &inc.StartedAt, &resolvedAt,
-			&inc.Severity, &affectedServicesJSON,
+			&inc.Severity, &rawServices,
 		); err != nil {
 			return nil, err
 		}
 		if resolvedAt.Valid {
 			inc.ResolvedAt = resolvedAt.Time
 		}
-		if err := json.Unmarshal(affectedServicesJSON, &inc.AffectedServices); err != nil {
-			return nil, err
+		services, parseErr := parseAffectedServices(rawServices)
+		if parseErr != nil {
+			return nil, parseErr
 		}
+		inc.AffectedServices = services
 		incidents = append(incidents, inc)
 	}
 	return incidents, rows.Err()
