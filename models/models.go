@@ -83,6 +83,21 @@ type Incident struct {
 	UpdatedAt          time.Time `json:"updated_at"`
 }
 
+// Metric represents a single Prometheus metric sample.
+type Metric struct {
+	Name   string            `json:"name"`
+	Value  float64           `json:"value"`
+	Labels map[string]string `json:"labels"`
+	At     time.Time         `json:"at"`
+}
+
+// LogEntry represents a single Loki log line.
+type LogEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	Stream    string    `json:"stream"`
+	Line      string    `json:"line"`
+}
+
 // Evidence represents a piece of investigation evidence
 type Evidence struct {
 	ID          string    `json:"id"`
@@ -96,6 +111,11 @@ type Evidence struct {
 	Contradicts []string  `json:"contradicts_evidence,omitempty"`
 	Ordinal     int       `json:"ordinal"`
 	CreatedAt   time.Time `json:"created_at"`
+	Version     int       `json:"version,omitempty"` // optimistic concurrency
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+	// Enriched data fields
+	Metrics []Metric   `json:"metrics,omitempty"`
+	Logs    []LogEntry `json:"logs,omitempty"`
 }
 
 // DeliveryAttempt represents a delivery attempt for a report

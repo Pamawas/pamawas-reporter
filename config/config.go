@@ -8,23 +8,30 @@ import (
 )
 
 type Config struct {
-	DatabaseURL       string
-	Port              string
-	LogLevel          string
-	Environment       string
-	DiscordWebhookURL string
-	TelegramBotToken  string
-	TelegramChatID    string
-	TelegramAPIBaseURL string
-	EmailSMTPHost     string
-	EmailSMTPPort     int
-	EmailUsername     string
-	EmailPassword     string
-	EmailFrom         string
-	EmailTo           string
-	ReportTemplate    string
-	ReportInterval    time.Duration
-	Mode              string
+	DatabaseURL         string
+	Port                string
+	LogLevel            string
+	Environment         string
+	DiscordWebhookURL   string
+	TelegramBotToken    string
+	TelegramChatID      string
+	TelegramAPIBaseURL  string
+	EmailSMTPHost       string
+	EmailSMTPPort       int
+	EmailUsername       string
+	EmailPassword       string
+	EmailFrom           string
+	EmailTo             string
+	ReportTemplate      string
+	ReportInterval      time.Duration
+	Mode                string
+	PrometheusURL       string
+	PrometheusQueryTemplate string
+	PrometheusTimeout   int // in seconds
+	LokiURL             string
+	LokiQueryTemplate   string
+	LokiTimeout         int // in seconds
+	LokiMaxLines        int
 }
 
 func Load() Config {
@@ -88,6 +95,29 @@ func Load() Config {
 	if err := v.BindEnv("mode", "REPORTER_MODE", "PAMAWAS_REPORTER_MODE"); err != nil {
 		panic(fmt.Sprintf("failed to bind REPORTER_MODE env: %v", err))
 	}
+	// Prometheus configuration
+	if err := v.BindEnv("prometheus_url", "PROMETHEUS_URL", "PAMAWAS_REPORTER_PROMETHEUS_URL"); err != nil {
+		panic(fmt.Sprintf("failed to bind PROMETHEUS_URL env: %v", err))
+	}
+	if err := v.BindEnv("prometheus_query_template", "PROMETHEUS_QUERY_TEMPLATE", "PAMAWAS_REPORTER_PROMETHEUS_QUERY_TEMPLATE"); err != nil {
+		panic(fmt.Sprintf("failed to bind PROMETHEUS_QUERY_TEMPLATE env: %v", err))
+	}
+	if err := v.BindEnv("prometheus_timeout", "PROMETHEUS_TIMEOUT", "PAMAWAS_REPORTER_PROMETHEUS_TIMEOUT"); err != nil {
+		panic(fmt.Sprintf("failed to bind PROMETHEUS_TIMEOUT env: %v", err))
+	}
+	// Loki configuration
+	if err := v.BindEnv("loki_url", "LOKI_URL", "PAMAWAS_REPORTER_LOKI_URL"); err != nil {
+		panic(fmt.Sprintf("failed to bind LOKI_URL env: %v", err))
+	}
+	if err := v.BindEnv("loki_query_template", "LOKI_QUERY_TEMPLATE", "PAMAWAS_REPORTER_LOKI_QUERY_TEMPLATE"); err != nil {
+		panic(fmt.Sprintf("failed to bind LOKI_QUERY_TEMPLATE env: %v", err))
+	}
+	if err := v.BindEnv("loki_timeout", "LOKI_TIMEOUT", "PAMAWAS_REPORTER_LOKI_TIMEOUT"); err != nil {
+		panic(fmt.Sprintf("failed to bind LOKI_TIMEOUT env: %v", err))
+	}
+	if err := v.BindEnv("loki_max_lines", "LOKI_MAX_LINES", "PAMAWAS_REPORTER_LOKI_MAX_LINES"); err != nil {
+		panic(fmt.Sprintf("failed to bind LOKI_MAX_LINES env: %v", err))
+	}
 
 	// Defaults
 	v.SetDefault("port", "8080")
@@ -109,23 +139,41 @@ func Load() Config {
 	}
 
 	cfg := Config{
-		DatabaseURL:       v.GetString("database_url"),
-		Port:              v.GetString("port"),
-		LogLevel:          v.GetString("log_level"),
-		Environment:       v.GetString("environment"),
-		DiscordWebhookURL: v.GetString("discord_webhook_url"),
-		TelegramBotToken:  v.GetString("telegram_bot_token"),
-		TelegramChatID:    v.GetString("telegram_chat_id"),
-		TelegramAPIBaseURL: v.GetString("telegram_api_base_url"),
-		EmailSMTPHost:     v.GetString("email_smtp_host"),
-		EmailSMTPPort:     v.GetInt("email_smtp_port"),
-		EmailUsername:     v.GetString("email_username"),
-		EmailPassword:     v.GetString("email_password"),
-		EmailFrom:         v.GetString("email_from"),
-		EmailTo:           v.GetString("email_to"),
-		ReportTemplate:    v.GetString("report_template"),
-		ReportInterval:    reportInterval,
-		Mode:              v.GetString("mode"),
+		DatabaseURL:             v.GetString("database_url"),
+		Port:                    v.GetString("port"),
+		LogLevel:                v.GetString("log_level"),
+		Environment:             v.GetString("environment"),
+		DiscordWebhookURL:       v.GetString("discord_webhook_url"),
+		TelegramBotToken:        v.GetString("telegram_bot_token"),
+		TelegramChatID:          v.GetString("telegram_chat_id"),
+		TelegramAPIBaseURL:      v.GetString("telegram_api_base_url"),
+		EmailSMTPHost:           v.GetString("email_smtp_host"),
+		EmailSMTPPort:           v.GetInt("email_smtp_port"),
+		EmailUsername:           v.GetString("email_username"),
+		EmailPassword:           v.GetString("email_password"),
+		EmailFrom:               v.GetString("email_from"),
+		EmailTo:                 v.GetString("email_to"),
+		ReportTemplate:          v.GetString("report_template"),
+		ReportInterval:          reportInterval,
+		Mode:                    v.GetString("mode"),
+		PrometheusURL:           v.GetString("prometheus_url"),
+		PrometheusQueryTemplate: v.GetString("prometheus_query_template"),
+		PrometheusTimeout:       v.GetInt("prometheus_timeout"),
+		LokiURL:                 v.GetString("loki_url"),
+		LokiQueryTemplate:       v.GetString("loki_query_template"),
+		LokiTimeout:             v.GetInt("loki_timeout"),
+		LokiMaxLines:            v.GetInt("loki_max_lines"),
+	}
+
+	// Set defaults for new fields
+	if cfg.PrometheusTimeout == 0 {
+		cfg.PrometheusTimeout = 30 // default 30 seconds
+	}
+	if cfg.LokiTimeout == 0 {
+		cfg.LokiTimeout = 30
+	}
+	if cfg.LokiMaxLines == 0 {
+		cfg.LokiMaxLines = 100
 	}
 
 	if cfg.DatabaseURL == "" {

@@ -13,6 +13,7 @@ type Metrics struct {
 	DBConnectionErrors     prometheus.Counter
 	LastSentTimestamp      prometheus.Gauge
 	ReporterRunning        prometheus.Gauge
+	FetchDuration          *prometheus.HistogramVec
 }
 
 // NewMetrics creates and registers all metrics
@@ -55,6 +56,14 @@ func NewMetrics() *Metrics {
 				Name: "reporter_running",
 				Help: "Whether reporter is currently running (1) or not (0)",
 			},
+		),
+		FetchDuration: promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "pamawas_fetch_duration_seconds",
+				Help:    "Duration of Prometheus/Loki fetch operations in seconds",
+				Buckets: prometheus.DefBuckets,
+			},
+			[]string{"type"},
 		),
 	}
 }

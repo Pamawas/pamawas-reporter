@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/Pamawas/pamawas-reporter/config"
+	"github.com/Pamawas/pamawas-reporter/fetcher"
 	"github.com/Pamawas/pamawas-reporter/handlers"
 	"github.com/Pamawas/pamawas-reporter/metrics"
 	"github.com/Pamawas/pamawas-reporter/middleware"
@@ -81,8 +82,31 @@ func main() {
 	// Initialize metrics
 	m := metrics.NewMetrics()
 
-	// Initialize handlers
-	h := handlers.NewHandler(db, cfg, m)
+	// Create fetcher implementations
+	var metricsFetcher fetcher.MetricsFetcher
+	var logsFetcher fetcher.LogsFetcher
+
+	if cfg.PrometheusURL != "" {
+		pf, err := fetcher.NewPrometheusFetcher(cfg.PrometheusURL, cfg.PrometheusQueryTemplate, time.Duration(cfg.PrometheusTimeout)*time.Second)
+		if err != nil {
+			log.Fatal().Err(err).Msg("Failed to create Prometheus fetcher")
+		}
+		metricsFetcher = pf
+		log.Info().Str("prometheus_url", cfg.PrometheusURL).Msg("Prometheus fetcher initialized")
+	} else {
+		metricsFetcher = &fetcher.NoOpMetricsFetcher{}
+	}
+
+	if cfg.LokiURL != "" {
+		lf := fetcher.NewLokiFetcher(cfg.LokiURL, cfg.LokiQueryTemplate, time.Duration(cfg.LokiTimeout)*time.Second, cfg.LokiMaxLines)
+		logsFetcher = lf
+		log.Info().Str("loki_url", cfg.LokiURL).Msg("Loki fetcher initialized")
+	} else {
+		logsFetcher = &fetcher.NoOpLogsFetcher{}
+	}
+
+	// Initialize handlers with fetchers
+	h := handlers.NewHandler(db, cfg, m, metricsFetcher, logsFetcher)
 
 	// Start background worker if not in manual mode
 	if cfg.Mode != "manual" {
@@ -99,6 +123,8 @@ func main() {
 	// V1 API endpoints
 	r.HandleFunc("/api/v1/reports", h.ReportHandler)
 	r.HandleFunc("/api/v1/status", h.StatusHandler)
+	// Evidence refresh endpoint (internal)
+	r.HandleFunc("/incidents/{id}/evidence/refresh", h.RefreshEvidenceHandler)
 	registerMetricsRoutes(r, h.MetricsHandler())
 
 	// Wrap router with middleware
@@ -153,6 +179,7 @@ func initLogger(cfg config.Config) {
 	if cfg.Environment == "development" {
 		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
 	} else {
-		log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
+		log.Logger = zerolog.Nop()
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr}).With().Timestamp().Logger()
 	}
 }

@@ -17,3 +17,14 @@ email_to: ""
 report_template: ""
 report_interval: "1h"
 mode: "auto"
+
+# Prometheus configuration (optional - for evidence enrichment)
+prometheus_url: ""
+prometheus_query_template: '{incident="%s"}'
+prometheus_timeout: 30
+
+# Loki configuration (optional - for evidence enrichment)
+loki_url: ""
+loki_query_template: '{incident="%s"}'
+loki_timeout: 30
+loki_max_lines: 100

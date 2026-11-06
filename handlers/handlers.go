@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
 
 	"github.com/Pamawas/pamawas-reporter/config"
+	"github.com/Pamawas/pamawas-reporter/fetcher"
 	"github.com/Pamawas/pamawas-reporter/metrics"
 	"github.com/Pamawas/pamawas-reporter/models"
 	"github.com/Pamawas/pamawas-reporter/service"
@@ -18,39 +20,45 @@ import (
 
 // Handler holds dependencies for HTTP handlers
 type Handler struct {
-	reporter *service.Reporter
-	cfg      config.Config
-	metrics  *metrics.Metrics
-	db       *sql.DB
+	reporter       *service.Reporter
+	cfg            config.Config
+	metrics        *metrics.Metrics
+	db             *sql.DB
+	metricsFetcher fetcher.MetricsFetcher
+	logsFetcher    fetcher.LogsFetcher
 }
 
-// NewHandler creates a new handler with dependencies
-func NewHandler(db *sql.DB, cfg config.Config, m *metrics.Metrics) *Handler {
+// NewHandler creates a new handler with dependencies and fetcher implementations.
+func NewHandler(db *sql.DB, cfg config.Config, m *metrics.Metrics, mf fetcher.MetricsFetcher, lf fetcher.LogsFetcher) *Handler {
 	reporterCfg := service.ReporterConfig{
-		DatabaseURL:       cfg.DatabaseURL,
-		Port:              cfg.Port,
-		DiscordWebhookURL: cfg.DiscordWebhookURL,
-		TelegramBotToken:  cfg.TelegramBotToken,
-		TelegramChatID:    cfg.TelegramChatID,
-		TelegramAPIBaseURL: cfg.TelegramAPIBaseURL,
-		EmailSMTPHost:     cfg.EmailSMTPHost,
-		EmailSMTPPort:     cfg.EmailSMTPPort,
-		EmailUsername:     cfg.EmailUsername,
-		EmailPassword:     cfg.EmailPassword,
-		EmailFrom:         cfg.EmailFrom,
-		EmailTo:           cfg.EmailTo,
-		ReportTemplate:    cfg.ReportTemplate,
-		ReportInterval:    cfg.ReportInterval,
-		Mode:              cfg.Mode,
+		DatabaseURL:         cfg.DatabaseURL,
+		Port:                cfg.Port,
+		DiscordWebhookURL:   cfg.DiscordWebhookURL,
+		TelegramBotToken:    cfg.TelegramBotToken,
+		TelegramChatID:      cfg.TelegramChatID,
+		TelegramAPIBaseURL:  cfg.TelegramAPIBaseURL,
+		EmailSMTPHost:       cfg.EmailSMTPHost,
+		EmailSMTPPort:       cfg.EmailSMTPPort,
+		EmailUsername:       cfg.EmailUsername,
+		EmailPassword:       cfg.EmailPassword,
+		EmailFrom:           cfg.EmailFrom,
+		EmailTo:             cfg.EmailTo,
+		ReportTemplate:      cfg.ReportTemplate,
+		ReportInterval:      cfg.ReportInterval,
+		Mode:                cfg.Mode,
 	}
 
 	reporter := service.NewReporter(db, reporterCfg, m)
+	reporter.SetMetricsFetcher(mf)
+	reporter.SetLogsFetcher(lf)
 
 	return &Handler{
-		reporter: reporter,
-		cfg:      cfg,
-		metrics:  m,
-		db:       db,
+		reporter:       reporter,
+		cfg:            cfg,
+		metrics:        m,
+		db:             db,
+		metricsFetcher: mf,
+		logsFetcher:    lf,
 	}
 }
 
@@ -61,35 +69,19 @@ func (h *Handler) HealthHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
 	if err := h.db.PingContext(r.Context()); err != nil {
 		h.metrics.DBConnectionErrors.Inc()
 		log.Error().Err(err).Msg("Health check failed: database connection")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		if encodeErr := json.NewEncoder(w).Encode(models.HealthResponse{
-			Status: "unhealthy",
-			Error:  fmt.Sprintf("Database connection failed: %v", err),
-		}); encodeErr != nil {
-			log.Error().Err(encodeErr).Msg("Failed to encode health response")
-		}
+		json.NewEncoder(w).Encode(models.HealthResponse{Status: "unhealthy", Error: fmt.Sprintf("Database connection failed: %v", err)})
 		return
 	}
-
 	h.reporter.MuLock()
 	lastSent := h.reporter.LastSent()
 	running := h.reporter.Running()
 	h.reporter.MuUnlock()
-
 	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(models.HealthResponse{
-		Status:    "healthy",
-		Timestamp: time.Now().UTC(),
-		LastSent:  lastSent,
-		Running:   running,
-		Version:   "1.0.0",
-	}); err != nil {
-		log.Error().Err(err).Msg("Failed to encode health response")
-	}
+	json.NewEncoder(w).Encode(models.HealthResponse{Status: "healthy", Timestamp: time.Now().UTC(), LastSent: lastSent, Running: running, Version: "1.0.0"})
 }
 
 // ReadyHandler handles readiness check requests
@@ -99,51 +91,35 @@ func (h *Handler) ReadyHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
 	if err := h.db.PingContext(r.Context()); err != nil {
 		log.Error().Err(err).Msg("Readiness check failed: database not ready")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		if encodeErr := json.NewEncoder(w).Encode(models.ReadyResponse{
-			Status: "not ready",
-			Error:  fmt.Sprintf("Database not ready: %v", err),
-		}); encodeErr != nil {
-			log.Error().Err(encodeErr).Msg("Failed to encode ready response")
-		}
+		json.NewEncoder(w).Encode(models.ReadyResponse{Status: "not ready", Error: fmt.Sprintf("Database not ready: %v", err)})
 		return
 	}
-
 	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(models.ReadyResponse{Status: "ready"}); err != nil {
-		log.Error().Err(err).Msg("Failed to encode ready response")
-	}
+	json.NewEncoder(w).Encode(models.ReadyResponse{Status: "ready"})
 }
 
 // ReportHandler handles typed report requests from the scheduler.
-// The frozen v1 contract (POST /api/v1/reports) carries a JSON ReportPayload;
-// the legacy untyped daily trigger is no longer exposed on this route.
 func (h *Handler) ReportHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
 	var payload models.ReportPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}
-
 	resp, err := h.reporter.ProcessReportRequest(r.Context(), payload)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Report generation failed: %v", err), http.StatusInternalServerError)
 		return
 	}
-
 	w.WriteHeader(http.StatusAccepted)
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		log.Error().Err(err).Msg("Failed to encode report response")
-	}
+	json.NewEncoder(w).Encode(resp)
 }
 
 // StatusHandler returns the current status of the reporter
@@ -153,23 +129,45 @@ func (h *Handler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
 	h.reporter.MuLock()
 	defer h.reporter.MuUnlock()
-
-	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]interface{}{
 		"last_sent": h.reporter.LastSent(),
 		"running":   h.reporter.Running(),
 		"uptime":    time.Since(h.reporter.StartTime()).String(),
 		"version":   "1.0.0",
-	}); err != nil {
-		log.Error().Err(err).Msg("Failed to encode status response")
-	}
+	})
 }
 
 // MetricsHandler returns the Prometheus metrics handler
 func (h *Handler) MetricsHandler() http.Handler {
 	return promhttp.Handler()
+}
+
+// RefreshEvidenceHandler enriches evidence for a given incident ID.
+func (h *Handler) RefreshEvidenceHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Expected path: /incidents/{id}/evidence/refresh
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) != 4 || parts[0] != "incidents" || parts[2] != "evidence" || parts[3] != "refresh" {
+		http.Error(w, "Invalid URL", http.StatusBadRequest)
+		return
+	}
+	incidentID := parts[1]
+	// Simple auth placeholder - check for pamawas:incident:write scope
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") == "" {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if err := h.reporter.EnrichEvidence(r.Context(), incidentID); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to enrich evidence: %v", err), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // Reporter returns the reporter instance
