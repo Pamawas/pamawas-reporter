@@ -1,14 +1,11 @@
 package main
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
-	"time"
 
 	_ "github.com/lib/pq"
 
@@ -47,39 +44,6 @@ type TestConfig struct {
 func getTestConfig() TestConfig {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	return TestConfig{DatabaseURL: dbURL}
-}
-
-// TestReporter_GenerateDailyReport tests report generation
-func TestReporter_GenerateDailyReport(t *testing.T) {
-	cfg := getTestConfig()
-
-	db, err := sql.Open("postgres", cfg.DatabaseURL)
-	if err != nil {
-		t.Skipf("Skipping test: cannot open database: %v", err)
-	}
-	defer func() {
-		if closeErr := db.Close(); closeErr != nil {
-			t.Logf("Failed to close database: %v", closeErr)
-		}
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := db.PingContext(ctx); err != nil {
-		t.Skipf("Skipping test: database not available: %v", err)
-	}
-
-	t.Skip("Cannot test private method generateDailyReport")
-}
-
-// TestReporter_TemplateRendering tests custom template rendering
-func TestReporter_TemplateRendering(t *testing.T) {
-	_ = service.NewReporter(nil, service.ReporterConfig{
-		ReportTemplate: "Health: {{HealthyPercentage}}%\nIncidents: {{TotalIncidents}}\nActive: {{NeedsAttention}}\nRecovered: {{Recovered}}\nCause: {{MostLikelyCause}}\nConfidence: {{Confidence}}",
-	}, nil)
-
-	t.Skip("Cannot test private method generateDailyReport")
 }
 
 // TestReporter_SendToDiscord tests Discord payload formatting

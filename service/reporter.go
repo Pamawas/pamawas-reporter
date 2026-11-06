@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/rs/zerolog/log"
 	"github.com/wneessen/go-mail"
 
@@ -362,24 +363,15 @@ func (r *Reporter) loadEvidenceForIncidents(ctx context.Context, incidentIDs []s
 		return make(map[string][]models.Evidence), nil
 	}
 
-	// Build placeholders for IN clause
-	placeholders := make([]string, len(incidentIDs))
-	args := make([]interface{}, len(incidentIDs))
-	for i, id := range incidentIDs {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-		args[i] = id
-	}
+	const query = `SELECT e.id, e.incident_id, e.type, e.content, e.source, e.confidence,
+       e.supports_evidence, e.contradicts_evidence, e.ordinal
+FROM evidence e
+JOIN investigation_runs ir ON e.run_id = ir.id
+WHERE e.incident_id = ANY($1)
+  AND ir.status = 'completed'
+ORDER BY e.incident_id, ir.completed_at DESC, e.ordinal`
 
-	query := "SELECT e.id, e.incident_id, e.type, e.content, e.source, e.confidence,\n" +
-		"       e.supports_evidence, e.contradicts_evidence, e.ordinal\n" +
-		"FROM evidence e\n" +
-		"JOIN investigation_runs ir ON e.run_id = ir.id\n" +
-		"WHERE e.incident_id IN (" + strings.Join(placeholders, ",") + ")\n" +
-		"  AND ir.status = 'completed'\n" +
-		"ORDER BY e.incident_id, ir.completed_at DESC, e.ordinal"
-	// #nosec G202 -- placeholders are parameterized, not user input
-
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := r.db.QueryContext(ctx, query, pq.Array(incidentIDs))
 	if err != nil {
 		return nil, err
 	}
@@ -565,20 +557,12 @@ func (r *Reporter) getIncidentsByIDs(ctx context.Context, incidentIDs []string) 
 		return []models.Incident{}, nil
 	}
 
-	placeholders := make([]string, len(incidentIDs))
-	args := make([]interface{}, len(incidentIDs))
-	for i, id := range incidentIDs {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-		args[i] = id
-	}
+	const query = `SELECT id, title, status, started_at, resolved_at, severity, affected_services
+FROM incidents
+WHERE id = ANY($1)
+ORDER BY started_at DESC`
 
-	query := "SELECT id, title, status, started_at, resolved_at, severity, affected_services\n" +
-		"FROM incidents\n" +
-		"WHERE id IN (" + strings.Join(placeholders, ",") + ")\n" +
-		"ORDER BY started_at DESC"
-	// #nosec G202 -- placeholders are parameterized, not user input
-
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := r.db.QueryContext(ctx, query, pq.Array(incidentIDs))
 	if err != nil {
 		return nil, err
 	}
