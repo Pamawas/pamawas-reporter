@@ -42,6 +42,20 @@ func main() {
 		}
 	}()
 
+	// Connect to database with retries
+	log.Info().Msg("Opening database connection")
+	db, err := sql.Open("postgres", cfg.DatabaseURL)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Error opening database")
+	}
+
+	// Set up defer for database close after db is declared
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close database connection")
+		}
+	}()
+
 	log.Info().
 		Str("port", cfg.Port).
 		Str("environment", cfg.Environment).
@@ -50,32 +64,21 @@ func main() {
 		Str("mode", cfg.Mode).
 		Msg("Starting pamawas-reporter")
 
-	// Connect to database with retries
-	log.Info().Msg("Opening database connection")
-	db, err := sql.Open("postgres", cfg.DatabaseURL)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Error opening database")
-	}
-	defer func() {
-		if err := db.Close(); err != nil {
-			log.Error().Err(err).Msg("Failed to close database connection")
-		}
-	}()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	log.Info().Int("max_attempts", 30).Msg("Waiting for database to be ready")
+	var pingErr error
 	for i := 0; i < 30; i++ {
-		if err := db.PingContext(ctx); err == nil {
+		if pingErr = db.PingContext(ctx); pingErr == nil {
 			break
 		}
-		log.Info().Int("attempt", i+1).Err(err).Msg("Database not ready, retrying...")
+		log.Info().Int("attempt", i+1).Err(pingErr).Msg("Database not ready, retrying...")
 		time.Sleep(1 * time.Second)
 	}
 
-	if err := db.PingContext(ctx); err != nil {
-		log.Fatal().Err(err).Msg("Failed to connect to database after retries")
+	if finalErr := db.PingContext(ctx); finalErr != nil {
+		log.Fatal().Err(finalErr).Msg("Failed to connect to database after retries")
 	}
 
 	log.Info().Msg("Connected to database successfully")
