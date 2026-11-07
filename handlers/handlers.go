@@ -65,12 +65,15 @@ func NewHandler(db *sql.DB, cfg config.Config, m *metrics.Metrics) *Handler {
 func (h *Handler) HealthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodGet {
+		log.Error().Str("method", r.Method).Str("path", r.URL.Path).
+			Msg("HealthHandler: method not allowed")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	log.Debug().Str("path", r.URL.Path).Msg("HealthHandler: received health check")
 	if err := h.db.PingContext(r.Context()); err != nil {
 		h.metrics.DBConnectionErrors.Inc()
-		log.Error().Err(err).Msg("Health check failed: database connection")
+		log.Error().Err(err).Msg("HealthHandler: database connection failed")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		writeJSON(w, models.HealthResponse{Status: "unhealthy", Error: fmt.Sprintf("Database connection failed: %v", err)})
 		return
@@ -87,11 +90,14 @@ func (h *Handler) HealthHandler(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ReadyHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodGet {
+		log.Error().Str("method", r.Method).Str("path", r.URL.Path).
+			Msg("ReadyHandler: method not allowed")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	log.Debug().Str("path", r.URL.Path).Msg("ReadyHandler: received readiness check")
 	if err := h.db.PingContext(r.Context()); err != nil {
-		log.Error().Err(err).Msg("Readiness check failed: database not ready")
+		log.Error().Err(err).Msg("ReadyHandler: database not ready")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		writeJSON(w, models.ReadyResponse{Status: "not ready", Error: fmt.Sprintf("Database not ready: %v", err)})
 		return
@@ -104,19 +110,47 @@ func (h *Handler) ReadyHandler(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ReportHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodPost {
+		log.Error().Str("method", r.Method).Str("path", r.URL.Path).
+			Msg("ReportHandler: method not allowed")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	log.Info().
+		Str("request_id", r.Header.Get("X-Request-ID")).
+		Str("path", r.URL.Path).
+		Msg("ReportHandler: processing report request")
+
 	var payload models.ReportPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		log.Error().Err(err).Str("path", r.URL.Path).
+			Str("request_id", payload.RequestID).
+			Msg("ReportHandler: invalid request body")
 		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}
+
+	log.Debug().
+		Str("request_id", payload.RequestID).
+		Str("report_type", payload.ReportType).
+		Msg("ReportHandler: decoded payload")
+
 	resp, err := h.reporter.ProcessReportRequest(r.Context(), payload)
 	if err != nil {
+		log.Error().Err(err).
+			Str("request_id", payload.RequestID).
+			Str("report_type", payload.ReportType).
+			Msg("ReportHandler: report generation failed")
 		http.Error(w, fmt.Sprintf("Report generation failed: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	log.Info().
+		Str("report_id", resp.ReportID).
+		Str("request_id", payload.RequestID).
+		Str("status", resp.Status).
+		Msg("ReportHandler: report generated successfully")
+
 	w.WriteHeader(http.StatusAccepted)
 	writeJSON(w, resp)
 }
@@ -125,9 +159,12 @@ func (h *Handler) ReportHandler(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodGet {
+		log.Error().Str("method", r.Method).Str("path", r.URL.Path).
+			Msg("StatusHandler: method not allowed")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	log.Debug().Str("path", r.URL.Path).Msg("StatusHandler: requested")
 	h.reporter.MuLock()
 	defer h.reporter.MuUnlock()
 	writeJSON(w, map[string]interface{}{

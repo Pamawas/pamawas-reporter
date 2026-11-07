@@ -30,5 +30,5 @@ func printStartupBanner(version, port string) {
 | |__) | | |__    | |__) | | | | | | |__) |    | |    | |__    | |__) |
 |  _  /  |  __|   |  ___/  | |_| | |  _  /     | |    |  __|   |  _  /
 |_| \_\  |______| |_|       \___/  |_| \_\     |_|    |______| |_| \_\`
-	fmt.Printf("\033[1;36m%s\n%s\033[0m\nVersion: %s | Port: :%s\n\n", banner, serviceArt, version, port)
+	fmt.Fprintf(os.Stderr, "\033[1;36m%s\n%s\033[0m\nVersion: %s | Port: :%s\n\n", banner, serviceArt, version, port)
 }

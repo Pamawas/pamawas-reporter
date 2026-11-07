@@ -51,6 +51,7 @@ func main() {
 		Msg("Starting pamawas-reporter")
 
 	// Connect to database with retries
+	log.Info().Msg("Opening database connection")
 	db, err := sql.Open("postgres", cfg.DatabaseURL)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Error opening database")
@@ -64,11 +65,12 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	log.Info().Int("max_attempts", 30).Msg("Waiting for database to be ready")
 	for i := 0; i < 30; i++ {
 		if err := db.PingContext(ctx); err == nil {
 			break
 		}
-		log.Info().Int("attempt", i+1).Msg("Waiting for database...")
+		log.Info().Int("attempt", i+1).Err(err).Msg("Database not ready, retrying...")
 		time.Sleep(1 * time.Second)
 	}
 
@@ -76,7 +78,7 @@ func main() {
 		log.Fatal().Err(err).Msg("Failed to connect to database after retries")
 	}
 
-	log.Info().Msg("Connected to database")
+	log.Info().Msg("Connected to database successfully")
 
 	// Initialize metrics
 	m := metrics.NewMetrics()
@@ -150,10 +152,13 @@ func initLogger(cfg config.Config) {
 	}
 	zerolog.SetGlobalLevel(level)
 
+	// Always create a proper output logger with timestamp
+	outputLogger := log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}).With().Timestamp().Logger()
+
 	if cfg.Environment == "development" {
-		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
+		log.Logger = outputLogger
 	} else {
-		log.Logger = zerolog.Nop()
-		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr}).With().Timestamp().Logger()
+		// Avoid Nop() - directly set to proper output logger
+		log.Logger = outputLogger
 	}
 }
