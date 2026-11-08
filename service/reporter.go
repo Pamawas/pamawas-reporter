@@ -47,6 +47,11 @@ type ReporterConfig struct {
 	ReportTemplate         string
 	ReportInterval         time.Duration
 	Mode                   string
+	// HighSeverityInvestigationTimeout is how long the reporter waits for an
+	// incident's investigation to reach a terminal state before generating a
+	// high-severity report. This prevents reports from being generated before
+	// investigation evidence is available. Zero disables the wait.
+	HighSeverityInvestigationTimeout time.Duration
 }
 
 // Reporter holds the database connection and reporting logic
@@ -209,6 +214,14 @@ func (r *Reporter) ProcessReportRequest(ctx context.Context, payload models.Repo
 		return nil, fmt.Errorf("unknown report type: %s", payload.ReportType)
 	}
 
+	// For high-severity reports, wait for the incident investigations to reach a
+	// terminal state so the report includes the investigation findings rather
+	// than "investigation unavailable". This bounds the wait and gracefully
+	// degrades (empty evidence) if the investigation does not finish in time.
+	if payload.ReportType == "high_severity" && r.config.HighSeverityInvestigationTimeout > 0 && len(incidentIDs) > 0 {
+		r.waitForInvestigationRuns(ctx, incidentIDs, r.config.HighSeverityInvestigationTimeout)
+	}
+
 	// Load evidence for all selected incidents
 	incidentEvidence, err := r.loadEvidenceForIncidents(ctx, incidentIDs)
 	if err != nil {
@@ -355,6 +368,52 @@ func (r *Reporter) selectDailyIncidents(ctx context.Context, periodStart, period
 	}
 
 	return incidentIDs, inclusionReasons, rows.Err()
+}
+
+// waitForInvestigationRuns polls the database until every incident has at least
+// one investigation run that has reached a terminal state (completed, failed, or
+// failed_terminal), or until timeout elapses. This closes the race where the
+// scheduler triggers a high-severity report before the investigator finishes, so
+// the report can render actual investigation evidence. If the investigation never
+// finishes, the caller degrades gracefully with whatever evidence is available.
+func (r *Reporter) waitForInvestigationRuns(ctx context.Context, incidentIDs []string, timeout time.Duration) {
+	const query = `
+		SELECT COUNT(*) FILTER (WHERE total_runs > 0 AND terminal_runs = total_runs) AS ready,
+		       COUNT(*) AS total_incidents
+		FROM (
+			SELECT i.id,
+			       COUNT(ir.id) AS total_runs,
+			       COUNT(ir.id) FILTER (WHERE ir.status IN ('completed', 'failed', 'failed_terminal')) AS terminal_runs
+			FROM unnest($1::text[]) AS i(id)
+			LEFT JOIN investigation_runs ir ON ir.incident_id = i.id
+			GROUP BY i.id
+		) AS per_incident
+	`
+
+	deadline := time.Now().Add(timeout)
+	for {
+		var ready, total int
+		err := r.db.QueryRowContext(ctx, query, pq.Array(incidentIDs)).Scan(&ready, &total)
+		if err == nil && total > 0 && ready == total {
+			log.Info().Int("incidents", total).Msg("All high-severity investigations reached a terminal state")
+			return
+		}
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to check investigation run status during wait")
+		}
+
+		if time.Now().After(deadline) {
+			log.Warn().Str("timeout", timeout.String()).Int("incidents", total).Int("ready", ready).Msg("Timed out waiting for high-severity investigations")
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			log.Info().Err(ctx.Err()).Msg("Context cancelled while waiting for high-severity investigations")
+			return
+		case <-time.After(5 * time.Second):
+		}
+	}
 }
 
 // loadEvidenceForIncidents loads the latest terminal investigation evidence for each incident

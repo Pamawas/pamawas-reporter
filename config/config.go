@@ -25,6 +25,10 @@ type Config struct {
 	ReportTemplate      string
 	ReportInterval      time.Duration
 	Mode                string
+	// HighSeverityInvestigationTimeout is how long the reporter waits for a
+	// high-severity incident's investigation to reach a terminal state before
+	// generating the report
+	HighSeverityInvestigationTimeout time.Duration
 }
 
 func Load() Config {
@@ -88,6 +92,9 @@ func Load() Config {
 	if err := v.BindEnv("mode", "REPORTER_MODE", "PAMAWAS_REPORTER_MODE"); err != nil {
 		panic(fmt.Sprintf("failed to bind REPORTER_MODE env: %v", err))
 	}
+	if err := v.BindEnv("high_severity_investigation_timeout", "HighSeverityInvestigationTimeout", "PAMAWAS_REPORTER_HIGH_SEVERITY_INVESTIGATION_TIMEOUT"); err != nil {
+		panic(fmt.Sprintf("failed to bind HighSeverityInvestigationTimeout env: %v", err))
+	}
 
 	// Defaults
 	v.SetDefault("port", "8080")
@@ -96,6 +103,7 @@ func Load() Config {
 	v.SetDefault("email_smtp_port", 587)
 	v.SetDefault("report_interval", "1h")
 	v.SetDefault("mode", "auto")
+	v.SetDefault("high_severity_investigation_timeout", "5m")
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
@@ -126,6 +134,7 @@ func Load() Config {
 		ReportTemplate:     v.GetString("report_template"),
 		ReportInterval:     reportInterval,
 		Mode:               v.GetString("mode"),
+		HighSeverityInvestigationTimeout: v.GetDuration("high_severity_investigation_timeout"),
 	}
 
 	if cfg.DatabaseURL == "" {

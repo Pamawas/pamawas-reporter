@@ -49,6 +49,7 @@ func NewHandler(db *sql.DB, cfg config.Config, m *metrics.Metrics) *Handler {
 		ReportTemplate:    cfg.ReportTemplate,
 		ReportInterval:    cfg.ReportInterval,
 		Mode:              cfg.Mode,
+		HighSeverityInvestigationTimeout: cfg.HighSeverityInvestigationTimeout,
 	}
 
 	reporter := service.NewReporter(db, reporterCfg, m)
