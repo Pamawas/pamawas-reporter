@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +54,10 @@ type ReporterConfig struct {
 	// high-severity report. This prevents reports from being generated before
 	// investigation evidence is available. Zero disables the wait.
 	HighSeverityInvestigationTimeout time.Duration
+	// DiscordRateLimitDelay is the minimum delay between Discord webhook chunk sends.
+	// Set to 0 to use the default (1 second). Configure this to control pacing
+	// and avoid hitting Discord's ~5 messages per 5 seconds rate limit.
+	DiscordRateLimitDelay time.Duration
 }
 
 // Reporter holds the database connection and reporting logic
@@ -1245,6 +1251,8 @@ func (r *Reporter) sendReport(report models.Report) error {
 // Discord's incoming webhook limits the "content" field to 2000 characters.
 // We chunk the content into 2000-char segments and send each as a separate
 // webhook call so the full report is delivered even if it exceeds the limit.
+// Rate limiting: Discord allows ~5 messages per 5 seconds per webhook.
+// We pace sends with a base delay and honor 429 retry_after headers.
 func (r *Reporter) sendToDiscord(ctx context.Context, report models.Report) error {
 	if r.config.DiscordWebhookURL == "" {
 		return nil
@@ -1254,6 +1262,13 @@ func (r *Reporter) sendToDiscord(ctx context.Context, report models.Report) erro
 	chunks := chunkString(report.Content, maxDiscordContent)
 
 	var firstErr error
+	// Discord rate limit: ~5 messages per 5 seconds = 1 message/second sustained
+	// Use a pacing delay between chunks to avoid triggering rate limits
+	basePacingDelay := r.config.DiscordRateLimitDelay
+	if basePacingDelay <= 0 {
+		basePacingDelay = 1 * time.Second
+	}
+
 	for i, chunk := range chunks {
 		payload := map[string]interface{}{
 			"content":  chunk,
@@ -1268,39 +1283,26 @@ func (r *Reporter) sendToDiscord(ctx context.Context, report models.Report) erro
 			continue
 		}
 
-		req, err := http.NewRequestWithContext(r.ctx, http.MethodPost, r.config.DiscordWebhookURL, strings.NewReader(string(payloadBytes)))
-		if err != nil {
+		// Per-chunk retry logic with 429 handling
+		chunkErr := r.sendDiscordChunkWithRetry(ctx, i, payloadBytes)
+		if chunkErr != nil {
 			if firstErr == nil {
-				firstErr = err
+				firstErr = chunkErr
 			}
-			log.Error().Err(err).Int("chunk", i).Msg("Failed to create Discord request")
+			// Continue with remaining chunks even if one fails
+			// The error is logged inside sendDiscordChunkWithRetry
 			continue
 		}
-		req.Header.Set("Content-Type", "application/json")
 
-		resp, err := r.httpClient.Do(req)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			log.Error().Err(err).Int("chunk", i).Msg("Failed to send Discord webhook request")
-			continue
+		// Pace between chunks to respect Discord's rate limit
+	// Skip delay after the last chunk
+	if i < len(chunks)-1 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(basePacingDelay):
 		}
-		defer func() {
-			if closeErr := resp.Body.Close(); closeErr != nil {
-				log.Error().Err(closeErr).Msg("Failed to close response body")
-			}
-		}()
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			err := fmt.Errorf("discord webhook returned status %d (chunk %d)", resp.StatusCode, i)
-			if firstErr == nil {
-				firstErr = err
-			}
-			log.Error().Err(err).Int("chunk", i).Msg("Discord webhook error")
-		} else {
-			log.Info().Int("chunk", i).Int("chunk_len", len(chunk)).Msg("Discord webhook sent successfully")
-		}
+	}
 	}
 
 	if firstErr != nil {
@@ -1308,6 +1310,101 @@ func (r *Reporter) sendToDiscord(ctx context.Context, report models.Report) erro
 	}
 
 	return nil
+}
+
+// sendDiscordChunkWithRetry sends a single chunk with retry logic for rate limits (429)
+// Returns error only if all retries exhausted or non-retryable error occurs
+func (r *Reporter) sendDiscordChunkWithRetry(ctx context.Context, chunkIndex int, payloadBytes []byte) error {
+	const maxRetries = 3
+	const baseRetryDelay = 2 * time.Second
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequestWithContext(r.ctx, http.MethodPost, r.config.DiscordWebhookURL, strings.NewReader(string(payloadBytes)))
+		if err != nil {
+			log.Error().Err(err).Int("chunk", chunkIndex).Msg("Failed to create Discord request")
+			return err // Non-retryable
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := r.httpClient.Do(req)
+		if err != nil {
+			log.Error().Err(err).Int("chunk", chunkIndex).Int("attempt", attempt+1).Msg("Failed to send Discord webhook request")
+			if attempt == maxRetries {
+				return err
+			}
+			// Exponential backoff for network errors
+			delay := baseRetryDelay * time.Duration(attempt+1)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+			continue
+		}
+
+		// Read body to allow connection reuse, but we only need headers for 429
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			log.Info().Int("chunk", chunkIndex).Int("chunk_len", len(payloadBytes)).Msg("Discord webhook sent successfully")
+			return nil
+		}
+
+		// Handle 429 rate limit with retry_after header
+		if resp.StatusCode == http.StatusTooManyRequests {
+			retryAfter := r.parseRetryAfter(resp.Header.Get("Retry-After"), respBody)
+			log.Warn().
+				Int("chunk", chunkIndex).
+				Int("attempt", attempt+1).
+				Dur("retry_after", retryAfter).
+				Msg("Discord rate limited (429), will retry")
+
+			if attempt == maxRetries {
+				err := fmt.Errorf("discord webhook rate limited after %d retries (chunk %d)", maxRetries, chunkIndex)
+				log.Error().Err(err).Int("chunk", chunkIndex).Msg("Discord webhook error")
+				return err
+			}
+
+			// Wait for retry_after (or default backoff) before retrying
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retryAfter):
+			}
+			continue
+		}
+
+		// Non-429 error: log and return (don't retry other error codes here,
+		// the caller's firstErr mechanism will capture it)
+		err = fmt.Errorf("discord webhook returned status %d (chunk %d)", resp.StatusCode, chunkIndex)
+		log.Error().Err(err).Int("chunk", chunkIndex).Int("attempt", attempt+1).Msg("Discord webhook error")
+		return err
+	}
+
+	return fmt.Errorf("discord chunk %d: max retries exhausted", chunkIndex)
+}
+
+// parseRetryAfter extracts retry-after from header or response body
+// Discord sends retry_after in seconds in the header or as milliseconds in JSON body
+func (r *Reporter) parseRetryAfter(header string, body []byte) time.Duration {
+	// Try header first (seconds)
+	if header != "" {
+		if seconds, err := strconv.Atoi(header); err == nil {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+
+	// Try JSON body (milliseconds) - Discord format: {"retry_after": 1234.5, "global": true}
+	var retryAfterJSON struct {
+		RetryAfter float64 `json:"retry_after"`
+	}
+	if err := json.Unmarshal(body, &retryAfterJSON); err == nil && retryAfterJSON.RetryAfter > 0 {
+		return time.Duration(retryAfterJSON.RetryAfter) * time.Millisecond
+	}
+
+	// Default fallback
+	return 2 * time.Second
 }
 
 // chunkString splits s into slices of at most maxLen characters, preferring
