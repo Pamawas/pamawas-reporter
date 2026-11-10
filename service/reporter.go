@@ -1005,6 +1005,8 @@ func (r *Reporter) classifyError(err error) string {
 		return "upstream_error"
 	case strings.Contains(errStr, "401") || strings.Contains(errStr, "403"):
 		return "auth_failed"
+	case strings.Contains(errStr, "400"):
+		return "bad_request"
 	case strings.Contains(errStr, "certificate") || strings.Contains(errStr, "tls"):
 		return "cert_error"
 	default:
@@ -1258,6 +1260,11 @@ func (r *Reporter) sendToDiscord(ctx context.Context, report models.Report) erro
 		return nil
 	}
 
+	if strings.TrimSpace(report.Content) == "" {
+		log.Warn().Str("report_id", report.ID).Msg("Discord: report content is empty, nothing to send")
+		return nil
+	}
+
 	const maxDiscordContent = 2000
 	chunks := chunkString(report.Content, maxDiscordContent)
 
@@ -1319,7 +1326,7 @@ func (r *Reporter) sendDiscordChunkWithRetry(ctx context.Context, chunkIndex int
 	const baseRetryDelay = 2 * time.Second
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		req, err := http.NewRequestWithContext(r.ctx, http.MethodPost, r.config.DiscordWebhookURL, strings.NewReader(string(payloadBytes)))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.config.DiscordWebhookURL, strings.NewReader(string(payloadBytes)))
 		if err != nil {
 			log.Error().Err(err).Int("chunk", chunkIndex).Msg("Failed to create Discord request")
 			return err // Non-retryable

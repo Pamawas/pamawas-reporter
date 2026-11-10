@@ -161,7 +161,7 @@ func TestSendToDiscordReturnsStatusError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusBadGateway) }))
 	defer server.Close()
 	r, _ := newMockReporter(t, ReporterConfig{DiscordWebhookURL: server.URL})
-	if err := r.sendToDiscord(context.Background(), models.Report{}); err == nil || !strings.Contains(err.Error(), "502") {
+	if err := r.sendToDiscord(context.Background(), models.Report{Content: "non-empty content"}); err == nil || !strings.Contains(err.Error(), "502") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -192,7 +192,7 @@ func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { r
 func TestSendReportReturnsDeliveryError(t *testing.T) {
 	r, _ := newMockReporter(t, ReporterConfig{DiscordWebhookURL: "http://discord.invalid"})
 	r.httpClient.Transport = roundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("delivery failed") })
-	if err := r.sendReport(models.Report{}); err == nil || !strings.Contains(err.Error(), "delivery failed") {
+	if err := r.sendReport(models.Report{Content: "non-empty content"}); err == nil || !strings.Contains(err.Error(), "delivery failed") {
 		t.Fatalf("error = %v", err)
 	}
 }
