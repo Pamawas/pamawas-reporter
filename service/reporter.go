@@ -1283,11 +1283,14 @@ func (r *Reporter) sendToDiscord(ctx context.Context, report models.Report) erro
 			if firstErr == nil {
 				firstErr = err
 			}
-			_ = resp.Body.Close()
 			log.Error().Err(err).Int("chunk", i).Msg("Failed to send Discord webhook request")
 			continue
 		}
-		_ = resp.Body.Close()
+		defer func() {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				log.Error().Err(closeErr).Msg("Failed to close response body")
+			}
+		}()
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			err := fmt.Errorf("discord webhook returned status %d (chunk %d)", resp.StatusCode, i)
@@ -1310,6 +1313,9 @@ func (r *Reporter) sendToDiscord(ctx context.Context, report models.Report) erro
 // chunkString splits s into slices of at most maxLen characters, preferring
 // to break at newlines when possible to avoid cutting words mid-line.
 func chunkString(s string, maxLen int) []string {
+	if len(s) == 0 {
+		return []string{""}
+	}
 	var chunks []string
 	for len(s) > 0 {
 		if len(s) <= maxLen {
