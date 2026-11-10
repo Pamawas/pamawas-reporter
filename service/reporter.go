@@ -621,9 +621,13 @@ func writeIncidentCardV2(sb *strings.Builder, inc models.Incident, evList []mode
 	borderTop := "┌─" + strings.Repeat("─", borderWidth) + "─┐\n"
 	borderBottom := "└─" + strings.Repeat("─", borderWidth) + "─┘\n"
 
-	// Pad a line to border width
+	// Pad a line to border width, guarding against content wider than the border
 	padLine := func(content string) string {
-		return "│ " + content + strings.Repeat(" ", borderWidth-len(content)) + " │\n"
+		padding := borderWidth - len(content)
+		if padding < 0 {
+			padding = 0
+		}
+		return "│ " + content + strings.Repeat(" ", padding) + " │\n"
 	}
 
 	sb.WriteString(borderTop)
