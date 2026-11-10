@@ -47,6 +47,8 @@ func NewHandler(db *sql.DB, cfg config.Config, m *metrics.Metrics) *Handler {
 		EmailFrom:                        cfg.EmailFrom,
 		EmailTo:                          cfg.EmailTo,
 		HighSeverityInvestigationTimeout: cfg.HighSeverityInvestigationTimeout,
+		PrometheusURL:                    cfg.PrometheusURL,
+		AvailabilityMetric:               cfg.AvailabilityMetric,
 	}
 
 	reporter := service.NewReporter(db, reporterCfg, m)

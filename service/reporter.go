@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +56,12 @@ type ReporterConfig struct {
 	// Set to 0 to use the default (1 second). Configure this to control pacing
 	// and avoid hitting Discord's ~5 messages per 5 seconds rate limit.
 	DiscordRateLimitDelay time.Duration
+	// PrometheusURL is the base URL of the Prometheus server used to query
+	// availability metrics.
+	PrometheusURL string
+	// AvailabilityMetric is the Prometheus metric name used to compute
+	// availability (e.g. "up").
+	AvailabilityMetric string
 }
 
 // Reporter holds the database connection and reporting logic
@@ -583,12 +590,94 @@ ORDER BY started_at DESC`
 	return incidents, rows.Err()
 }
 
-// getAvailabilityMetric returns the availability percentage if a named metric exists, -1 otherwise
+// getAvailabilityMetric queries Prometheus for the configured availability
+// metric (e.g. "up") and returns the average availability percentage over the
+// given period. Returns -1 if no metric is configured or the query fails.
 func (r *Reporter) getAvailabilityMetric(ctx context.Context, periodStart, periodEnd time.Time) float64 {
-	// For MVP, we don't have a configured availability metric
-	// This would query Prometheus for a specific availability metric
-	// Return -1 to indicate unavailable
-	return -1
+	if r.config.PrometheusURL == "" || r.config.AvailabilityMetric == "" {
+		return -1
+	}
+
+	// Query Prometheus for the average value of the availability metric over
+	// the reporting period. Using avg_over_time gives a percentage-like value
+	// for up/down metrics (1 = up, 0 = down).
+	query := url.Values{}
+	query.Set("query", fmt.Sprintf("avg_over_time(%s[%ds])",
+		r.config.AvailabilityMetric, int(periodEnd.Sub(periodStart).Seconds())))
+	query.Set("time", periodEnd.Format(time.RFC3339))
+
+	apiURL := r.config.PrometheusURL + "/api/v1/query?" + query.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to create Prometheus availability query")
+		return -1
+	}
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		log.Error().Err(err).Str("url", apiURL).Msg("Prometheus availability query failed")
+		return -1
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close Prometheus response body")
+		}
+	}()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Error().Int("status", resp.StatusCode).Str("url", apiURL).Msg("Prometheus availability query returned non-2xx")
+		return -1
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to read Prometheus availability response")
+		return -1
+	}
+
+	var result struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string `json:"resultType"`
+			Result     []struct {
+				Value []interface{} `json:"value"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Error().Err(err).Msg("Failed to unmarshal Prometheus availability response")
+		return -1
+	}
+
+	if result.Status != "success" || len(result.Data.Result) == 0 {
+		log.Warn().Str("status", result.Status).Int("result_count", len(result.Data.Result)).
+			Msg("Prometheus availability query returned no results")
+		return -1
+	}
+
+	// The value array is [timestamp, value_string]
+	val := result.Data.Result[0].Value
+	if len(val) < 2 {
+		return -1
+	}
+	valStr, ok := val[1].(string)
+	if !ok {
+		return -1
+	}
+
+	availability, err := strconv.ParseFloat(valStr, 64)
+	if err != nil {
+		log.Error().Err(err).Str("value", valStr).Msg("Failed to parse Prometheus availability value")
+		return -1
+	}
+
+	// avg_over_time of "up" returns a fraction (0-1). Convert to percentage.
+	if availability > 0 && availability <= 1 {
+		availability *= 100
+	}
+
+	return availability
 }
 
 // persistReportWithIncidents persists the report and report_incidents in a transaction

@@ -26,6 +26,13 @@ type Config struct {
 	// high-severity incident's investigation to reach a terminal state before
 	// generating the report
 	HighSeverityInvestigationTimeout time.Duration
+	// PrometheusURL is the base URL of the Prometheus server used to query
+	// availability metrics. When empty, availability is reported as unavailable.
+	PrometheusURL string
+	// AvailabilityMetric is the Prometheus metric name used to compute
+	// availability (e.g. "up"). When empty, availability is reported as
+	// unavailable.
+	AvailabilityMetric string
 }
 
 func Load() Config {
@@ -83,6 +90,12 @@ func Load() Config {
 	if err := v.BindEnv("high_severity_investigation_timeout", "HighSeverityInvestigationTimeout", "PAMAWAS_REPORTER_HIGH_SEVERITY_INVESTIGATION_TIMEOUT"); err != nil {
 		panic(fmt.Sprintf("failed to bind HighSeverityInvestigationTimeout env: %v", err))
 	}
+	if err := v.BindEnv("prometheus_url", "PROMETHEUS_URL", "PAMAWAS_REPORTER_PROMETHEUS_URL"); err != nil {
+		panic(fmt.Sprintf("failed to bind PROMETHEUS_URL env: %v", err))
+	}
+	if err := v.BindEnv("availability_metric", "AVAILABILITY_METRIC", "PAMAWAS_REPORTER_AVAILABILITY_METRIC"); err != nil {
+		panic(fmt.Sprintf("failed to bind AVAILABILITY_METRIC env: %v", err))
+	}
 
 	// Defaults
 	v.SetDefault("port", "8080")
@@ -113,6 +126,8 @@ func Load() Config {
 		EmailFrom:                        v.GetString("email_from"),
 		EmailTo:                          v.GetString("email_to"),
 		HighSeverityInvestigationTimeout: v.GetDuration("high_severity_investigation_timeout"),
+		PrometheusURL:                    v.GetString("prometheus_url"),
+		AvailabilityMetric:               v.GetString("availability_metric"),
 	}
 
 	if cfg.DatabaseURL == "" {

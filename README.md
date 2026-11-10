@@ -60,6 +60,8 @@ go run main.go
 | `EMAIL_TO` | To email address | Optional |
 | `LOG_LEVEL` | debug, info, warn, error | `info` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Tempo OTLP gRPC endpoint | `tempo:4317` |
+| `PROMETHEUS_URL` | Base URL of the Prometheus server for availability queries | Optional |
+| `AVAILABILITY_METRIC` | Prometheus metric name used to compute availability (e.g. `up`) | Optional |
 
 ## API Endpoints
 
@@ -78,6 +80,20 @@ go run main.go
 | Prometheus Metrics | `/metrics` — `ReportsGeneratedTotal`, `DeliveryTotal`, `DBConnectionErrors` |
 | JSON Logging | stdout — trace_id, span_id, service, method, path, status_code, duration_ms |
 | OpenTelemetry | OTLP gRPC → Tempo:4317 |
+
+## Availability Metric
+
+When `PROMETHEUS_URL` and `AVAILABILITY_METRIC` are both set, the reporter queries Prometheus for the configured metric (e.g. `up`) over each report's time window using `avg_over_time(<metric>[<duration>])`. The result is converted to a percentage and included in the report:
+
+```
+Infrastructure was 99.50% available during this period.
+```
+
+If either variable is unset, the report falls back to:
+
+```
+Availability: unavailable (no named availability metric configured)
+```
 
 ## Building
 
