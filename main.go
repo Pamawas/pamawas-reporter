@@ -156,13 +156,12 @@ func initLogger(cfg config.Config) {
 	}
 	zerolog.SetGlobalLevel(level)
 
-	// Always create a proper output logger with timestamp
-	outputLogger := log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}).With().Timestamp().Logger()
-
+	// Match the structured JSON format used by the other pamawas services:
+	// human-readable console output in development, structured JSON in
+	// production.
 	if cfg.Environment == "development" {
-		log.Logger = outputLogger
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}).With().Timestamp().Logger()
 	} else {
-		// Avoid Nop() - directly set to proper output logger
-		log.Logger = outputLogger
+		log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
 	}
 }
