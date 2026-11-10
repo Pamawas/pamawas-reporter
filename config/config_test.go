@@ -4,7 +4,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 )
 
 func inTempDir(t *testing.T) {
@@ -27,15 +26,10 @@ func TestLoadDefaultsAndEnvironmentOverrides(t *testing.T) {
 	inTempDir(t)
 	t.Setenv("PAMAWAS_REPORTER_DATABASE_URL", "postgres://example/test")
 	t.Setenv("PAMAWAS_REPORTER_PORT", "9090")
-	t.Setenv("PAMAWAS_REPORTER_REPORT_INTERVAL", "15m")
-	t.Setenv("PAMAWAS_REPORTER_MODE", "manual")
 
 	cfg := Load()
 	if cfg.DatabaseURL != "postgres://example/test" || cfg.Port != "9090" {
 		t.Fatalf("unexpected config: %+v", cfg)
-	}
-	if cfg.ReportInterval != 15*time.Minute || cfg.Mode != "manual" {
-		t.Fatalf("environment overrides not applied: %+v", cfg)
 	}
 	if cfg.LogLevel != "info" || cfg.Environment != "development" || cfg.EmailSMTPPort != 587 {
 		t.Fatalf("defaults not applied: %+v", cfg)
@@ -59,26 +53,8 @@ func TestLoadPanicsWithoutDatabaseURL(t *testing.T) {
 	_ = Load()
 }
 
-func TestLoadPanicsForInvalidInterval(t *testing.T) {
-	inTempDir(t)
-	t.Setenv("PAMAWAS_REPORTER_DATABASE_URL", "postgres://example/test")
-	t.Setenv("PAMAWAS_REPORTER_REPORT_INTERVAL", "sometimes")
-	defer func() {
-		got := recover()
-		if got == nil {
-			t.Fatalf("expected panic, got nil")
-			return
-		}
-		msg, ok := got.(string)
-		if !ok || !strings.Contains(msg, "invalid report_interval") {
-			t.Fatalf("unexpected panic: %v", got)
-		}
-	}()
-	_ = Load()
-}
-
 func TestValidate(t *testing.T) {
-	valid := Config{DatabaseURL: "db", Port: "8080", ReportInterval: time.Minute}
+	valid := Config{DatabaseURL: "db", Port: "8080"}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
@@ -87,9 +63,8 @@ func TestValidate(t *testing.T) {
 		cfg  Config
 		want string
 	}{
-		{"database", Config{Port: "8080", ReportInterval: time.Minute}, "database_url"},
-		{"port", Config{DatabaseURL: "db", ReportInterval: time.Minute}, "port"},
-		{"interval", Config{DatabaseURL: "db", Port: "8080"}, "report_interval"},
+		{"database", Config{Port: "8080"}, "database_url"},
+		{"port", Config{DatabaseURL: "db"}, "port"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

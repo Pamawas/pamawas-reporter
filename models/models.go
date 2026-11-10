@@ -43,9 +43,6 @@ type Report struct {
 	GeneratedAt     time.Time `json:"generated_at"`
 	Status          string    `json:"status"`
 	CreatedAt       time.Time `json:"created_at"`
-	IncidentID      string    `json:"incident_id,omitempty"` // legacy compatibility
-	Channels        []string  `json:"channels,omitempty"`    // legacy compatibility
-	SentAt          time.Time `json:"sent_at,omitempty"`     // legacy compatibility
 }
 
 // ReportPayload represents the payload sent from scheduler to reporter
@@ -138,8 +135,6 @@ type DeliveryAttempt struct {
 type HealthResponse struct {
 	Status    string    `json:"status"`
 	Timestamp time.Time `json:"timestamp,omitempty"`
-	LastSent  time.Time `json:"last_sent,omitempty"`
-	Running   bool      `json:"running,omitempty"`
 	Version   string    `json:"version,omitempty"`
 	Error     string    `json:"error,omitempty"`
 }

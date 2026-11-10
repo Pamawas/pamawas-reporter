@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/prometheus/client_golang/prometheus"
@@ -21,13 +20,10 @@ import (
 
 func handlerMetrics() *metrics.Metrics {
 	return &metrics.Metrics{
-		ReportsGeneratedTotal:  prometheus.NewCounter(prometheus.CounterOpts{Name: "handler_reports_total"}),
-		DeliveryTotal:          prometheus.NewCounterVec(prometheus.CounterOpts{Name: "handler_delivery_total"}, []string{"channel", "status"}),
-		TemplateRenderDuration: prometheus.NewHistogram(prometheus.HistogramOpts{Name: "handler_render_seconds"}),
-		DBConnectionErrors:     prometheus.NewCounter(prometheus.CounterOpts{Name: "handler_db_errors_total"}),
-		LastSentTimestamp:      prometheus.NewGauge(prometheus.GaugeOpts{Name: "handler_last_sent"}),
-		ReporterRunning:        prometheus.NewGauge(prometheus.GaugeOpts{Name: "handler_running"}),
-		FetchDuration:          prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "pamawas_fetch_duration_seconds"}, []string{"type"}),
+		ReportsGeneratedTotal: prometheus.NewCounter(prometheus.CounterOpts{Name: "handler_reports_total"}),
+		DeliveryTotal:         prometheus.NewCounterVec(prometheus.CounterOpts{Name: "handler_delivery_total"}, []string{"channel", "status"}),
+		DBConnectionErrors:    prometheus.NewCounter(prometheus.CounterOpts{Name: "handler_db_errors_total"}),
+		FetchDuration:         prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "pamawas_fetch_duration_seconds"}, []string{"type"}),
 	}
 }
 
@@ -42,7 +38,7 @@ func newTestHandler(t *testing.T) (*Handler, sqlmock.Sqlmock) {
 			t.Logf("Failed to close database: %v", closeErr)
 		}
 	})
-	return NewHandler(db, config.Config{ReportInterval: time.Hour}, handlerMetrics()), mock
+	return NewHandler(db, config.Config{}, handlerMetrics()), mock
 }
 
 func TestNewHandlerExposesReporter(t *testing.T) {

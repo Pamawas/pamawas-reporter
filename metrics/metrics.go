@@ -7,13 +7,10 @@ import (
 
 // Metrics holds all Prometheus metrics for the reporter service
 type Metrics struct {
-	ReportsGeneratedTotal  prometheus.Counter
-	DeliveryTotal          *prometheus.CounterVec
-	TemplateRenderDuration prometheus.Histogram
-	DBConnectionErrors     prometheus.Counter
-	LastSentTimestamp      prometheus.Gauge
-	ReporterRunning        prometheus.Gauge
-	FetchDuration          *prometheus.HistogramVec
+	ReportsGeneratedTotal prometheus.Counter
+	DeliveryTotal         *prometheus.CounterVec
+	DBConnectionErrors    prometheus.Counter
+	FetchDuration         *prometheus.HistogramVec
 }
 
 // NewMetrics creates and registers all metrics
@@ -32,29 +29,10 @@ func NewMetrics() *Metrics {
 			},
 			[]string{"channel", "status"},
 		),
-		TemplateRenderDuration: promauto.NewHistogram(
-			prometheus.HistogramOpts{
-				Name:    "reporter_template_render_duration_seconds",
-				Help:    "Template render duration in seconds",
-				Buckets: prometheus.DefBuckets,
-			},
-		),
 		DBConnectionErrors: promauto.NewCounter(
 			prometheus.CounterOpts{
 				Name: "reporter_db_connection_errors_total",
 				Help: "Total number of database connection errors",
-			},
-		),
-		LastSentTimestamp: promauto.NewGauge(
-			prometheus.GaugeOpts{
-				Name: "reporter_last_sent_timestamp_seconds",
-				Help: "Timestamp of last report sent",
-			},
-		),
-		ReporterRunning: promauto.NewGauge(
-			prometheus.GaugeOpts{
-				Name: "reporter_running",
-				Help: "Whether reporter is currently running (1) or not (0)",
 			},
 		),
 		FetchDuration: promauto.NewHistogramVec(

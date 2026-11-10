@@ -61,8 +61,6 @@ func main() {
 		Str("port", cfg.Port).
 		Str("environment", cfg.Environment).
 		Str("log_level", cfg.LogLevel).
-		Str("report_interval", cfg.ReportInterval.String()).
-		Str("mode", cfg.Mode).
 		Msg("Starting pamawas-reporter")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -89,11 +87,6 @@ func main() {
 
 	// Initialize handlers (fetchers removed - evidence enrichment now in investigator)
 	h := handlers.NewHandler(db, cfg, m)
-
-	// Start background worker if not in manual mode
-	if cfg.Mode != "manual" {
-		go h.Reporter().StartWorker()
-	}
 
 	// Create router
 	r := http.NewServeMux()

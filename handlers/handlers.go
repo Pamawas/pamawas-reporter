@@ -34,21 +34,18 @@ type Handler struct {
 // NewHandler creates a new handler with dependencies.
 func NewHandler(db *sql.DB, cfg config.Config, m *metrics.Metrics) *Handler {
 	reporterCfg := service.ReporterConfig{
-		DatabaseURL:       cfg.DatabaseURL,
-		Port:              cfg.Port,
-		DiscordWebhookURL: cfg.DiscordWebhookURL,
-		TelegramBotToken:  cfg.TelegramBotToken,
-		TelegramChatID:    cfg.TelegramChatID,
-		TelegramAPIBaseURL: cfg.TelegramAPIBaseURL,
-		EmailSMTPHost:     cfg.EmailSMTPHost,
-		EmailSMTPPort:     cfg.EmailSMTPPort,
-		EmailUsername:     cfg.EmailUsername,
-		EmailPassword:     cfg.EmailPassword,
-		EmailFrom:         cfg.EmailFrom,
-		EmailTo:           cfg.EmailTo,
-		ReportTemplate:    cfg.ReportTemplate,
-		ReportInterval:    cfg.ReportInterval,
-		Mode:              cfg.Mode,
+		DatabaseURL:                      cfg.DatabaseURL,
+		Port:                             cfg.Port,
+		DiscordWebhookURL:                cfg.DiscordWebhookURL,
+		TelegramBotToken:                 cfg.TelegramBotToken,
+		TelegramChatID:                   cfg.TelegramChatID,
+		TelegramAPIBaseURL:               cfg.TelegramAPIBaseURL,
+		EmailSMTPHost:                    cfg.EmailSMTPHost,
+		EmailSMTPPort:                    cfg.EmailSMTPPort,
+		EmailUsername:                    cfg.EmailUsername,
+		EmailPassword:                    cfg.EmailPassword,
+		EmailFrom:                        cfg.EmailFrom,
+		EmailTo:                          cfg.EmailTo,
 		HighSeverityInvestigationTimeout: cfg.HighSeverityInvestigationTimeout,
 	}
 
@@ -79,12 +76,8 @@ func (h *Handler) HealthHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, models.HealthResponse{Status: "unhealthy", Error: fmt.Sprintf("Database connection failed: %v", err)})
 		return
 	}
-	h.reporter.MuLock()
-	lastSent := h.reporter.LastSent()
-	running := h.reporter.Running()
-	h.reporter.MuUnlock()
 	w.WriteHeader(http.StatusOK)
-	writeJSON(w, models.HealthResponse{Status: "healthy", Timestamp: time.Now().UTC(), LastSent: lastSent, Running: running, Version: "1.0.0"})
+	writeJSON(w, models.HealthResponse{Status: "healthy", Timestamp: time.Now().UTC(), Version: "1.0.0"})
 }
 
 // ReadyHandler handles readiness check requests
@@ -166,13 +159,9 @@ func (h *Handler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Debug().Str("path", r.URL.Path).Msg("StatusHandler: requested")
-	h.reporter.MuLock()
-	defer h.reporter.MuUnlock()
 	writeJSON(w, map[string]interface{}{
-		"last_sent": h.reporter.LastSent(),
-		"running":   h.reporter.Running(),
-		"uptime":    time.Since(h.reporter.StartTime()).String(),
-		"version":   "1.0.0",
+		"uptime":  time.Since(h.reporter.StartTime()).String(),
+		"version": "1.0.0",
 	})
 }
 

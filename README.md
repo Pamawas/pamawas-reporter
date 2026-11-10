@@ -1,6 +1,6 @@
 # pamawas-reporter
 
-**Report Generation & Delivery** — Renders investigation findings into morning digest format and delivers via Discord, Telegram, and Email.
+**Report Generation & Delivery** — Processes scheduler-created report requests and delivers them via Discord, Telegram, and Email.
 
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)](https://docker.com/)
@@ -11,24 +11,7 @@
 
 Generates human-readable reports from correlated incidents and their investigation evidence, then delivers them through multiple channels with independent retry logic.
 
-## Report Format (Morning Digest)
-
-```
-🌅 Good morning.
-
-Infrastructure was 99.97% healthy overnight.
-3 incidents occurred. 1 needs your attention. 2 recovered automatically.
-
-Most likely root cause: database connection exhaustion following the 01:47 deployment.
-Confidence: 87%.
-
-Recommended actions:
-1. Review connection-pool configuration.
-2. Compare the deployment's DB connection behavior.
-3. Add early-warning monitoring.
-
-No critical outage occurred.
-```
+Reports are generated only in response to scheduler requests. The reporter does not run a periodic report-generation worker.
 
 ## Delivery Channels
 
@@ -58,10 +41,6 @@ docker run -e DATABASE_URL="postgres://user:pass@host:5432/db" \
 # Local development
 go run main.go
 
-# Manual report trigger
-curl -X POST http://localhost:8080/report \
-  -H "Content-Type: application/json" \
-  -d '{"source": "manual"}'
 ```
 
 ## Configuration
@@ -79,9 +58,6 @@ curl -X POST http://localhost:8080/report \
 | `EMAIL_PASSWORD` | SMTP password | Optional |
 | `EMAIL_FROM` | From email address | Optional |
 | `EMAIL_TO` | To email address | Optional |
-| `REPORT_TEMPLATE` | Custom template string | Optional |
-| `REPORT_INTERVAL` | Background worker interval | `1h` |
-| `REPORTER_MODE` | Set to `manual` to disable background worker | auto |
 | `LOG_LEVEL` | debug, info, warn, error | `info` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Tempo OTLP gRPC endpoint | `tempo:4317` |
 
@@ -91,31 +67,15 @@ curl -X POST http://localhost:8080/report \
 |----------|--------|-------------|
 | `/healthz` | GET | Health check with DB connectivity |
 | `/ready` | GET | Readiness probe |
-| `/report` | POST | Manual report generation trigger |
-| `/status` | GET | Last sent report info |
+| `/api/v1/reports` | POST | Process a scheduler-created report request |
+| `/status` | GET | Reporter uptime and version |
 | `/metrics` | GET | Prometheus metrics |
-
-## Custom Templates
-
-Set `REPORT_TEMPLATE` to override the default. Available variables:
-
-| Variable | Description |
-|----------|-------------|
-| `{{HealthyPercentage}}` | Infrastructure health % |
-| `{{TotalIncidents}}` | Total incidents in period |
-| `{{NeedsAttention}}` | Firing incidents count |
-| `{{Recovered}}` | Resolved incidents count |
-| `{{MostLikelyCause}}` | Root cause from investigation |
-| `{{Confidence}}` | Confidence score (0-1) |
-| `{{Timestamp}}` | Report generation time |
-| `{{Incidents}}` | Full incident list with evidence |
-| `{{Evidence}}` | Evidence map keyed by incident ID |
 
 ## Observability
 
 | Feature | Endpoint |
 |---------|----------|
-| Prometheus Metrics | `/metrics` — `ReportsGeneratedTotal`, `DeliveryTotal`, `TemplateRenderDuration`, `LastSentTimestamp` |
+| Prometheus Metrics | `/metrics` — `ReportsGeneratedTotal`, `DeliveryTotal`, `DBConnectionErrors` |
 | JSON Logging | stdout — trace_id, span_id, service, method, path, status_code, duration_ms |
 | OpenTelemetry | OTLP gRPC → Tempo:4317 |
 

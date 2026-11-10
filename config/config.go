@@ -8,23 +8,20 @@ import (
 )
 
 type Config struct {
-	DatabaseURL         string
-	Port                string
-	LogLevel            string
-	Environment         string
-	DiscordWebhookURL   string
-	TelegramBotToken    string
-	TelegramChatID      string
-	TelegramAPIBaseURL  string
-	EmailSMTPHost       string
-	EmailSMTPPort       int
-	EmailUsername       string
-	EmailPassword       string
-	EmailFrom           string
-	EmailTo             string
-	ReportTemplate      string
-	ReportInterval      time.Duration
-	Mode                string
+	DatabaseURL        string
+	Port               string
+	LogLevel           string
+	Environment        string
+	DiscordWebhookURL  string
+	TelegramBotToken   string
+	TelegramChatID     string
+	TelegramAPIBaseURL string
+	EmailSMTPHost      string
+	EmailSMTPPort      int
+	EmailUsername      string
+	EmailPassword      string
+	EmailFrom          string
+	EmailTo            string
 	// HighSeverityInvestigationTimeout is how long the reporter waits for a
 	// high-severity incident's investigation to reach a terminal state before
 	// generating the report
@@ -83,15 +80,6 @@ func Load() Config {
 	if err := v.BindEnv("email_to", "EMAIL_TO", "PAMAWAS_REPORTER_EMAIL_TO"); err != nil {
 		panic(fmt.Sprintf("failed to bind EMAIL_TO env: %v", err))
 	}
-	if err := v.BindEnv("report_template", "REPORT_TEMPLATE", "PAMAWAS_REPORTER_REPORT_TEMPLATE"); err != nil {
-		panic(fmt.Sprintf("failed to bind REPORT_TEMPLATE env: %v", err))
-	}
-	if err := v.BindEnv("report_interval", "REPORT_INTERVAL", "PAMAWAS_REPORTER_REPORT_INTERVAL"); err != nil {
-		panic(fmt.Sprintf("failed to bind REPORT_INTERVAL env: %v", err))
-	}
-	if err := v.BindEnv("mode", "REPORTER_MODE", "PAMAWAS_REPORTER_MODE"); err != nil {
-		panic(fmt.Sprintf("failed to bind REPORTER_MODE env: %v", err))
-	}
 	if err := v.BindEnv("high_severity_investigation_timeout", "HighSeverityInvestigationTimeout", "PAMAWAS_REPORTER_HIGH_SEVERITY_INVESTIGATION_TIMEOUT"); err != nil {
 		panic(fmt.Sprintf("failed to bind HighSeverityInvestigationTimeout env: %v", err))
 	}
@@ -101,8 +89,6 @@ func Load() Config {
 	v.SetDefault("log_level", "info")
 	v.SetDefault("environment", "development")
 	v.SetDefault("email_smtp_port", 587)
-	v.SetDefault("report_interval", "1h")
-	v.SetDefault("mode", "auto")
 	v.SetDefault("high_severity_investigation_timeout", "5m")
 
 	if err := v.ReadInConfig(); err != nil {
@@ -111,29 +97,21 @@ func Load() Config {
 		}
 	}
 
-	reportInterval, err := time.ParseDuration(v.GetString("report_interval"))
-	if err != nil {
-		panic(fmt.Sprintf("invalid report_interval: %v", err))
-	}
-
 	cfg := Config{
-		DatabaseURL:      v.GetString("database_url"),
-		Port:               v.GetString("port"),
-		LogLevel:           v.GetString("log_level"),
-		Environment:        v.GetString("environment"),
-		DiscordWebhookURL:  v.GetString("discord_webhook_url"),
-		TelegramBotToken:   v.GetString("telegram_bot_token"),
-		TelegramChatID:     v.GetString("telegram_chat_id"),
-		TelegramAPIBaseURL: v.GetString("telegram_api_base_url"),
-		EmailSMTPHost:      v.GetString("email_smtp_host"),
-		EmailSMTPPort:      v.GetInt("email_smtp_port"),
-		EmailUsername:      v.GetString("email_username"),
-		EmailPassword:      v.GetString("email_password"),
-		EmailFrom:          v.GetString("email_from"),
-		EmailTo:            v.GetString("email_to"),
-		ReportTemplate:     v.GetString("report_template"),
-		ReportInterval:     reportInterval,
-		Mode:               v.GetString("mode"),
+		DatabaseURL:                      v.GetString("database_url"),
+		Port:                             v.GetString("port"),
+		LogLevel:                         v.GetString("log_level"),
+		Environment:                      v.GetString("environment"),
+		DiscordWebhookURL:                v.GetString("discord_webhook_url"),
+		TelegramBotToken:                 v.GetString("telegram_bot_token"),
+		TelegramChatID:                   v.GetString("telegram_chat_id"),
+		TelegramAPIBaseURL:               v.GetString("telegram_api_base_url"),
+		EmailSMTPHost:                    v.GetString("email_smtp_host"),
+		EmailSMTPPort:                    v.GetInt("email_smtp_port"),
+		EmailUsername:                    v.GetString("email_username"),
+		EmailPassword:                    v.GetString("email_password"),
+		EmailFrom:                        v.GetString("email_from"),
+		EmailTo:                          v.GetString("email_to"),
 		HighSeverityInvestigationTimeout: v.GetDuration("high_severity_investigation_timeout"),
 	}
 
@@ -149,9 +127,6 @@ func (c Config) Validate() error {
 	}
 	if c.Port == "" {
 		return fmt.Errorf("port is required")
-	}
-	if c.ReportInterval <= 0 {
-		return fmt.Errorf("report_interval must be positive")
 	}
 	return nil
 }
