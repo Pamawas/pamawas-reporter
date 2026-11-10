@@ -586,38 +586,66 @@ func writeIncidentDetailsV2(sb *strings.Builder, incidents []models.Incident, in
 	}
 }
 
-// writeIncidentCardV2 renders a single incident as a card.
+// writeIncidentCardV2 renders a single incident as a bordered Uptime Kuma-style card.
 func writeIncidentCardV2(sb *strings.Builder, inc models.Incident, evList []models.Evidence, inclusionReason string, timezone string) {
-	// Status line
 	statusBadge := statusColor(inc.Status)
 	sevBadge := severityColor(inc.Severity)
 
 	reasonLabel := inclusionReasonLabel(inclusionReason)
 
-	fmt.Fprintf(sb, "%s **%s** (%s)%s\n", statusBadge, inc.Title, inc.Status, reasonLabel)
-	fmt.Fprintf(sb, "%s **Severity:** %s | **Services:** %s\n", sevBadge, inc.Severity, strings.Join(inc.AffectedServices, ", "))
-
-	// Started / Resolved
 	startedLocal := inc.StartedAt.In(loadLocation(timezone))
-	fmt.Fprintf(sb, "📅 **Started:** %s\n", startedLocal.Format("2006-01-02 15:04:05"))
+	startedStr := startedLocal.Format("2006-01-02 15:04:05")
+
+	var resolvedStr string
 	if !inc.ResolvedAt.IsZero() {
 		resolvedLocal := inc.ResolvedAt.In(loadLocation(timezone))
-		fmt.Fprintf(sb, "✅ **Resolved:** %s\n", resolvedLocal.Format("2006-01-02 15:04:05"))
+		resolvedStr = resolvedLocal.Format("2006-01-02 15:04:05")
 	}
 
-	// ID
-	fmt.Fprintf(sb, "🔖 **ID:** %s\n", inc.ID[:min(8, len(inc.ID))])
+	idShort := inc.ID
+	if len(idShort) > 8 {
+		idShort = idShort[:8]
+	}
 
-	// Investigation findings
+	services := strings.Join(inc.AffectedServices, ", ")
+
+	// Card border width based on content (min 60 chars)
+	borderWidth := 60
+	if len(inc.Title)+len(statusBadge)+10 > borderWidth {
+		borderWidth = len(inc.Title) + len(statusBadge) + 10
+	}
+	if len(statusBadge)+len(sevBadge)+len("Severity: ")+len(inc.Severity)+len(" | Services: ")+len(services) > borderWidth {
+		borderWidth = len(statusBadge) + len(sevBadge) + len("Severity: ") + len(inc.Severity) + len(" | Services: ") + len(services)
+	}
+
+	borderTop := "┌─" + strings.Repeat("─", borderWidth) + "─┐\n"
+	borderBottom := "└─" + strings.Repeat("─", borderWidth) + "─┘\n"
+
+	// Pad a line to border width
+	padLine := func(content string) string {
+		return "│ " + content + strings.Repeat(" ", borderWidth-len(content)) + " │\n"
+	}
+
+	sb.WriteString(borderTop)
+	sb.WriteString(padLine(fmt.Sprintf("%s %s (%s)%s", statusBadge, inc.Title, inc.Status, reasonLabel)))
+	sb.WriteString(padLine(fmt.Sprintf("%s Severity: %s   |   Services: %s", sevBadge, inc.Severity, services)))
+	sb.WriteString(padLine(fmt.Sprintf("📅 Started: %s", startedStr)))
+	if resolvedStr != "" {
+		sb.WriteString(padLine(fmt.Sprintf("✅ Resolved: %s", resolvedStr)))
+	}
+	sb.WriteString(padLine(fmt.Sprintf("🔖 ID: %s", idShort)))
+
 	if len(evList) == 0 {
-		sb.WriteString("🔍 Investigation Findings: investigation unavailable\n\n")
-		return
+		sb.WriteString(padLine("🔍 Investigation Findings: investigation unavailable"))
+	} else {
+		sb.WriteString(padLine("🔍 Investigation Findings:"))
+		for _, ev := range evList {
+			sb.WriteString(padLine(fmt.Sprintf("   %s %s (%.0f%%) %s",
+				evidenceIcon(ev.Type), strings.ToUpper(ev.Type), ev.Confidence*100, ev.Content)))
+		}
 	}
-	sb.WriteString("🔍 Investigation Findings:\n")
-	for _, ev := range evList {
-		fmt.Fprintf(sb, "   %s [%s] (%.0f%%) %s\n",
-			evidenceIcon(ev.Type), strings.ToUpper(ev.Type), ev.Confidence*100, ev.Content)
-	}
+
+	sb.WriteString(borderBottom)
 	sb.WriteString("\n")
 }
 
