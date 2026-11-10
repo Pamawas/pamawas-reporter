@@ -113,11 +113,16 @@ func main() {
 	handler = middleware.ErrorLoggingMiddleware("pamawas-reporter", handler)
 
 	// Create server
+	writeTimeout := cfg.HighSeverityInvestigationTimeout + 2*time.Minute
+	if writeTimeout < 2*time.Minute {
+		writeTimeout = 2 * time.Minute
+	}
+
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      handler,
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		WriteTimeout: writeTimeout,
 		IdleTimeout:  60 * time.Second,
 	}
 
