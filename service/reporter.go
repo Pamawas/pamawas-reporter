@@ -1242,41 +1242,110 @@ func (r *Reporter) sendReport(report models.Report) error {
 }
 
 // sendToDiscord sends the report to Discord via webhook
+// Discord's incoming webhook limits the "content" field to 2000 characters.
+// We chunk the content into 2000-char segments and send each as a separate
+// webhook call so the full report is delivered even if it exceeds the limit.
 func (r *Reporter) sendToDiscord(ctx context.Context, report models.Report) error {
 	if r.config.DiscordWebhookURL == "" {
 		return nil
 	}
 
-	payload := map[string]interface{}{
-		"content":  report.Content,
-		"username": "Pamawas Reporter",
-	}
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
+	const maxDiscordContent = 2000
+	chunks := chunkString(report.Content, maxDiscordContent)
 
-	req, err := http.NewRequestWithContext(r.ctx, http.MethodPost, r.config.DiscordWebhookURL, strings.NewReader(string(payloadBytes)))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := r.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			log.Error().Err(closeErr).Msg("Failed to close response body")
+	var firstErr error
+	for i, chunk := range chunks {
+		payload := map[string]interface{}{
+			"content":  chunk,
+			"username": "Pamawas Reporter",
 		}
-	}()
+		payloadBytes, err := json.Marshal(payload)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			log.Error().Err(err).Int("chunk", i).Msg("Failed to marshal Discord payload")
+			continue
+		}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("discord webhook returned status %d", resp.StatusCode)
+		req, err := http.NewRequestWithContext(r.ctx, http.MethodPost, r.config.DiscordWebhookURL, strings.NewReader(string(payloadBytes)))
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			log.Error().Err(err).Int("chunk", i).Msg("Failed to create Discord request")
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := r.httpClient.Do(req)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			_ = resp.Body.Close()
+			log.Error().Err(err).Int("chunk", i).Msg("Failed to send Discord webhook request")
+			continue
+		}
+		_ = resp.Body.Close()
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			err := fmt.Errorf("discord webhook returned status %d (chunk %d)", resp.StatusCode, i)
+			if firstErr == nil {
+				firstErr = err
+			}
+			log.Error().Err(err).Int("chunk", i).Msg("Discord webhook error")
+		} else {
+			log.Info().Int("chunk", i).Int("chunk_len", len(chunk)).Msg("Discord webhook sent successfully")
+		}
+	}
+
+	if firstErr != nil {
+		return firstErr
 	}
 
 	return nil
+}
+
+// chunkString splits s into slices of at most maxLen characters, preferring
+// to break at newlines when possible to avoid cutting words mid-line.
+func chunkString(s string, maxLen int) []string {
+	var chunks []string
+	for len(s) > 0 {
+		if len(s) <= maxLen {
+			chunks = append(chunks, s)
+			return chunks
+		}
+
+		// Try to break at a newline within the last quarter of the chunk
+		searchEnd := maxLen - maxLen/4
+		if searchEnd < 1 {
+			searchEnd = 1
+		}
+		searchStart := maxLen - searchEnd
+		if searchStart < 0 {
+			searchStart = 0
+		}
+
+		// Look for a newline in the search window
+		bestCut := -1
+		for i := searchStart; i < len(s) && i < searchEnd; i++ {
+			if s[i] == '\n' {
+				bestCut = i
+				break
+			}
+		}
+
+		if bestCut >= 0 {
+			chunks = append(chunks, s[:bestCut+1])
+			s = s[bestCut+1:]
+		} else {
+			// No newline found; cut at maxLen
+			chunks = append(chunks, s[:maxLen])
+			s = s[maxLen:]
+		}
+	}
+	return chunks
 }
 
 // sendToTelegram sends the report to Telegram via Bot API
