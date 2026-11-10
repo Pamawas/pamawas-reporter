@@ -62,6 +62,9 @@ type ReporterConfig struct {
 	// AvailabilityMetric is the Prometheus metric name used to compute
 	// availability (e.g. "up").
 	AvailabilityMetric string
+	// ReportTemplate selects the report rendering template: "v1" (legacy
+	// plain text) or "v2" (Uptime Kuma-style card layout). Defaults to "v1".
+	ReportTemplate string
 }
 
 // Reporter holds the database connection and reporting logic
@@ -428,7 +431,11 @@ func (r *Reporter) generateReportContent(
 		totalIncidents, needsAttention, resolved)
 
 	// Incident details
-	writeIncidentDetails(&sb, incidents, incidentEvidence, inclusionReasons)
+	if r.config.ReportTemplate == "v2" {
+		writeIncidentDetailsV2(&sb, incidents, incidentEvidence, inclusionReasons, timezone)
+	} else {
+		writeIncidentDetails(&sb, incidents, incidentEvidence, inclusionReasons)
+	}
 
 	fmt.Fprintf(&sb, "---\nTemplate: %s | Generated: %s\n", TemplateVersion, time.Now().UTC().Format("2006-01-02 15:04:05 UTC"))
 
@@ -526,6 +533,95 @@ func evidenceIcon(evType string) string {
 		return "❓"
 	}
 	return "📝"
+}
+
+// statusColor returns an emoji status badge for the given incident status.
+func statusColor(status string) string {
+	switch status {
+	case "open", "investigating":
+		return "🟡"
+	case "resolved":
+		return "🟢"
+	case "suppressed":
+		return "⚫"
+	}
+	return "⚪"
+}
+
+// severityColor returns an emoji severity badge for the given severity level.
+func severityColor(severity string) string {
+	switch severity {
+	case "critical":
+		return "🔴"
+	case "high":
+		return "🟠"
+	case "warning":
+		return "🟡"
+	case "low":
+		return "🟢"
+	case "info":
+		return "🔵"
+	}
+	return "⚪"
+}
+
+// loadLocation returns a time.Location for the given timezone string, falling back to UTC.
+func loadLocation(timezone string) *time.Location {
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		log.Warn().Str("timezone", timezone).Msg("failed to load timezone, falling back to UTC")
+		return time.UTC
+	}
+	return loc
+}
+
+// writeIncidentDetailsV2 renders incident details using Uptime Kuma-style card
+// layout: each incident is presented as a bordered card with status chip,
+// key metrics, and formatted investigation findings.
+func writeIncidentDetailsV2(sb *strings.Builder, incidents []models.Incident, incidentEvidence map[string][]models.Evidence, inclusionReasons map[string]string, timezone string) {
+	if len(incidents) == 0 {
+		sb.WriteString("No incidents detected.\n\n")
+		return
+	}
+	for _, inc := range incidents {
+		writeIncidentCardV2(sb, inc, incidentEvidence[inc.ID], inclusionReasons[inc.ID], timezone)
+		sb.WriteString("\n")
+	}
+}
+
+// writeIncidentCardV2 renders a single incident as a card.
+func writeIncidentCardV2(sb *strings.Builder, inc models.Incident, evList []models.Evidence, inclusionReason string, timezone string) {
+	// Status line
+	statusBadge := statusColor(inc.Status)
+	sevBadge := severityColor(inc.Severity)
+
+	reasonLabel := inclusionReasonLabel(inclusionReason)
+
+	fmt.Fprintf(sb, "%s **%s** (%s)%s\n", statusBadge, inc.Title, inc.Status, reasonLabel)
+	fmt.Fprintf(sb, "%s **Severity:** %s | **Services:** %s\n", sevBadge, inc.Severity, strings.Join(inc.AffectedServices, ", "))
+
+	// Started / Resolved
+	startedLocal := inc.StartedAt.In(loadLocation(timezone))
+	fmt.Fprintf(sb, "📅 **Started:** %s\n", startedLocal.Format("2006-01-02 15:04:05"))
+	if !inc.ResolvedAt.IsZero() {
+		resolvedLocal := inc.ResolvedAt.In(loadLocation(timezone))
+		fmt.Fprintf(sb, "✅ **Resolved:** %s\n", resolvedLocal.Format("2006-01-02 15:04:05"))
+	}
+
+	// ID
+	fmt.Fprintf(sb, "🔖 **ID:** %s\n", inc.ID[:min(8, len(inc.ID))])
+
+	// Investigation findings
+	if len(evList) == 0 {
+		sb.WriteString("🔍 Investigation Findings: investigation unavailable\n\n")
+		return
+	}
+	sb.WriteString("🔍 Investigation Findings:\n")
+	for _, ev := range evList {
+		fmt.Fprintf(sb, "   %s [%s] (%.0f%%) %s\n",
+			evidenceIcon(ev.Type), strings.ToUpper(ev.Type), ev.Confidence*100, ev.Content)
+	}
+	sb.WriteString("\n")
 }
 
 func parseAffectedServices(raw []byte) ([]string, error) {

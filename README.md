@@ -62,6 +62,7 @@ go run main.go
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Tempo OTLP gRPC endpoint | `tempo:4317` |
 | `PROMETHEUS_URL` | Base URL of the Prometheus server for availability queries | Optional |
 | `AVAILABILITY_METRIC` | Prometheus metric name used to compute availability (e.g. `up`) | Optional |
+| `REPORT_TEMPLATE` | Report template: `v1` (legacy plain text) or `v2` (Uptime Kuma-style card layout) | `v1` |
 
 ## API Endpoints
 

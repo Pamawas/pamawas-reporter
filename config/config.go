@@ -33,6 +33,9 @@ type Config struct {
 	// availability (e.g. "up"). When empty, availability is reported as
 	// unavailable.
 	AvailabilityMetric string
+	// ReportTemplate selects the report rendering template: "v1" (legacy
+	// plain text) or "v2" (Uptime Kuma-style card layout). Defaults to "v1".
+	ReportTemplate string
 }
 
 func Load() Config {
@@ -96,6 +99,9 @@ func Load() Config {
 	if err := v.BindEnv("availability_metric", "AVAILABILITY_METRIC", "PAMAWAS_REPORTER_AVAILABILITY_METRIC"); err != nil {
 		panic(fmt.Sprintf("failed to bind AVAILABILITY_METRIC env: %v", err))
 	}
+	if err := v.BindEnv("report_template", "REPORT_TEMPLATE", "PAMAWAS_REPORTER_REPORT_TEMPLATE"); err != nil {
+		panic(fmt.Sprintf("failed to bind REPORT_TEMPLATE env: %v", err))
+	}
 
 	// Defaults
 	v.SetDefault("port", "8080")
@@ -103,6 +109,7 @@ func Load() Config {
 	v.SetDefault("environment", "development")
 	v.SetDefault("email_smtp_port", 587)
 	v.SetDefault("high_severity_investigation_timeout", "5m")
+	v.SetDefault("report_template", "v1")
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
@@ -128,6 +135,7 @@ func Load() Config {
 		HighSeverityInvestigationTimeout: v.GetDuration("high_severity_investigation_timeout"),
 		PrometheusURL:                    v.GetString("prometheus_url"),
 		AvailabilityMetric:               v.GetString("availability_metric"),
+		ReportTemplate:                   v.GetString("report_template"),
 	}
 
 	if cfg.DatabaseURL == "" {
