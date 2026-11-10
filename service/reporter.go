@@ -26,9 +26,6 @@ const (
 	// ReportPolicyVersion is the version of the report policy for idempotency
 	ReportPolicyVersion = 1
 
-	// TemplateVersion is the current template version
-	TemplateVersion = "pamawas-report-v1"
-
 	// DefaultTimezone is the default IANA timezone for daily reports
 	DefaultTimezone = "Asia/Jakarta"
 )
@@ -165,7 +162,7 @@ func (r *Reporter) ProcessReportRequest(ctx context.Context, payload models.Repo
 		PeriodStart:     periodStart,
 		PeriodEnd:       periodEnd,
 		Timezone:        payload.Timezone,
-		TemplateVersion: TemplateVersion,
+		TemplateVersion: fmt.Sprintf("pamawas-report-%s", r.config.ReportTemplate),
 		Content:         reportContent,
 		GeneratedAt:     time.Now(),
 		Status:          models.ReportStatusGenerated,
@@ -437,7 +434,7 @@ func (r *Reporter) generateReportContent(
 		writeIncidentDetails(&sb, incidents, incidentEvidence, inclusionReasons)
 	}
 
-	fmt.Fprintf(&sb, "---\nTemplate: %s | Generated: %s\n", TemplateVersion, time.Now().UTC().Format("2006-01-02 15:04:05 UTC"))
+	fmt.Fprintf(&sb, "---\nTemplate: pamawas-report-%s | Generated: %s\n", r.config.ReportTemplate, time.Now().UTC().Format("2006-01-02 15:04:05 UTC"))
 
 	return sb.String(), nil
 }
