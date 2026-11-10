@@ -645,8 +645,8 @@ func (r *Reporter) getAvailabilityMetric(ctx context.Context, periodStart, perio
 			} `json:"result"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Error().Err(err).Msg("Failed to unmarshal Prometheus availability response")
+	if unmarshalErr := json.Unmarshal(body, &result); unmarshalErr != nil {
+		log.Error().Err(unmarshalErr).Msg("Failed to unmarshal Prometheus availability response")
 		return -1
 	}
 
