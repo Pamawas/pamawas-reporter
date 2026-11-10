@@ -1343,8 +1343,13 @@ func (r *Reporter) sendDiscordChunkWithRetry(ctx context.Context, chunkIndex int
 		}
 
 		// Read body to allow connection reuse, but we only need headers for 429
-		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			log.Error().Err(readErr).Int("chunk", chunkIndex).Int("attempt", attempt+1).Msg("Failed to read Discord response body")
+		}
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Int("chunk", chunkIndex).Int("attempt", attempt+1).Msg("Failed to close Discord response body")
+		}
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			log.Info().Int("chunk", chunkIndex).Int("chunk_len", len(payloadBytes)).Msg("Discord webhook sent successfully")
@@ -1361,9 +1366,9 @@ func (r *Reporter) sendDiscordChunkWithRetry(ctx context.Context, chunkIndex int
 				Msg("Discord rate limited (429), will retry")
 
 			if attempt == maxRetries {
-				err := fmt.Errorf("discord webhook rate limited after %d retries (chunk %d)", maxRetries, chunkIndex)
-				log.Error().Err(err).Int("chunk", chunkIndex).Msg("Discord webhook error")
-				return err
+				rateLimitErr := fmt.Errorf("discord webhook rate limited after %d retries (chunk %d)", maxRetries, chunkIndex)
+				log.Error().Err(rateLimitErr).Int("chunk", chunkIndex).Msg("Discord webhook error")
+				return rateLimitErr
 			}
 
 			// Wait for retry_after (or default backoff) before retrying
