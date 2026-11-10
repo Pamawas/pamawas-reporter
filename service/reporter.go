@@ -34,21 +34,21 @@ const (
 
 // ReporterConfig holds the configuration for the reporter
 type ReporterConfig struct {
-	DatabaseURL            string
-	Port                   string
-	DiscordWebhookURL      string
-	TelegramBotToken       string
-	TelegramChatID         string
-	TelegramAPIBaseURL     string
-	EmailSMTPHost          string
-	EmailSMTPPort          int
-	EmailUsername          string
-	EmailPassword          string
-	EmailFrom              string
-	EmailTo                string
-	ReportTemplate         string
-	ReportInterval         time.Duration
-	Mode                   string
+	DatabaseURL        string
+	Port               string
+	DiscordWebhookURL  string
+	TelegramBotToken   string
+	TelegramChatID     string
+	TelegramAPIBaseURL string
+	EmailSMTPHost      string
+	EmailSMTPPort      int
+	EmailUsername      string
+	EmailPassword      string
+	EmailFrom          string
+	EmailTo            string
+	ReportTemplate     string
+	ReportInterval     time.Duration
+	Mode               string
 	// HighSeverityInvestigationTimeout is how long the reporter waits for an
 	// incident's investigation to reach a terminal state before generating a
 	// high-severity report. This prevents reports from being generated before
@@ -1295,14 +1295,14 @@ func (r *Reporter) sendToDiscord(ctx context.Context, report models.Report) erro
 		}
 
 		// Pace between chunks to respect Discord's rate limit
-	// Skip delay after the last chunk
-	if i < len(chunks)-1 {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(basePacingDelay):
+		// Skip delay after the last chunk
+		if i < len(chunks)-1 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(basePacingDelay):
+			}
 		}
-	}
 	}
 
 	if firstErr != nil {

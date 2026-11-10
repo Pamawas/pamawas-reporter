@@ -28,8 +28,8 @@ func TestSendToDiscordChunks(t *testing.T) {
 		sb.WriteString("This is a test message for Discord chunking. ")
 	}
 	report := models.Report{
-		ID:        "test-id",
-		Content:   sb.String(),
+		ID:         "test-id",
+		Content:    sb.String(),
 		ReportType: "daily",
 	}
 
@@ -71,7 +71,7 @@ func TestSendToDiscordRateLimitRetry(t *testing.T) {
 	defer server.Close()
 
 	r := NewReporter(nil, ReporterConfig{
-		DiscordWebhookURL: server.URL,
+		DiscordWebhookURL:     server.URL,
 		DiscordRateLimitDelay: 10 * time.Millisecond,
 	}, testMetrics())
 
@@ -91,7 +91,7 @@ func TestSendToDiscordRateLimitExhausted(t *testing.T) {
 	defer server.Close()
 
 	r := NewReporter(nil, ReporterConfig{
-		DiscordWebhookURL: server.URL,
+		DiscordWebhookURL:     server.URL,
 		DiscordRateLimitDelay: 10 * time.Millisecond,
 	}, testMetrics())
 
@@ -113,7 +113,7 @@ func TestSendToDiscordPacing(t *testing.T) {
 	defer server.Close()
 
 	r := NewReporter(nil, ReporterConfig{
-		DiscordWebhookURL: server.URL,
+		DiscordWebhookURL:     server.URL,
 		DiscordRateLimitDelay: 20 * time.Millisecond,
 	}, testMetrics())
 
