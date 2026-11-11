@@ -11,6 +11,9 @@ type Metrics struct {
 	DeliveryTotal         *prometheus.CounterVec
 	DBConnectionErrors    prometheus.Counter
 	FetchDuration         *prometheus.HistogramVec
+	CircuitBreakerState   *prometheus.GaugeVec
+	CircuitBreakerFailures *prometheus.CounterVec
+	StalledDeliveriesTotal prometheus.Counter
 }
 
 // NewMetrics creates and registers all metrics
@@ -42,6 +45,26 @@ func NewMetrics() *Metrics {
 				Buckets: prometheus.DefBuckets,
 			},
 			[]string{"type"},
+		),
+		CircuitBreakerState: promauto.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "reporter_circuit_breaker_state",
+				Help: "Circuit breaker state per channel (0=closed, 1=open, 2=half-open)",
+			},
+			[]string{"channel"},
+		),
+		CircuitBreakerFailures: promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "reporter_circuit_breaker_failures_total",
+				Help: "Total number of circuit breaker failures per channel",
+			},
+			[]string{"channel"},
+		),
+		StalledDeliveriesTotal: promauto.NewCounter(
+			prometheus.CounterOpts{
+				Name: "reporter_stalled_deliveries_total",
+				Help: "Total number of stalled delivery attempts recovered",
+			},
 		),
 	}
 }

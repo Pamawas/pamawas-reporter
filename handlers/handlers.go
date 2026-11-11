@@ -127,6 +127,52 @@ func (h *Handler) ReportHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Input validation
+	if payload.RequestID == "" {
+		log.Error().Str("path", r.URL.Path).Msg("ReportHandler: missing request_id")
+		http.Error(w, "request_id is required", http.StatusBadRequest)
+		return
+	}
+	if payload.ReportType == "" {
+		log.Error().Str("request_id", payload.RequestID).Msg("ReportHandler: missing report_type")
+		http.Error(w, "report_type is required", http.StatusBadRequest)
+		return
+	}
+	if payload.ReportType != "daily" && payload.ReportType != "high_severity" {
+		log.Error().Str("request_id", payload.RequestID).
+			Str("report_type", payload.ReportType).
+			Msg("ReportHandler: invalid report_type")
+		http.Error(w, "report_type must be 'daily' or 'high_severity'", http.StatusBadRequest)
+		return
+	}
+	if _, err := time.Parse(time.RFC3339, payload.PeriodStart); err != nil {
+		log.Error().Err(err).Str("request_id", payload.RequestID).
+			Str("period_start", payload.PeriodStart).
+			Msg("ReportHandler: invalid period_start")
+		http.Error(w, "period_start must be a valid RFC3339 timestamp", http.StatusBadRequest)
+		return
+	}
+	if _, err := time.Parse(time.RFC3339, payload.PeriodEnd); err != nil {
+		log.Error().Err(err).Str("request_id", payload.RequestID).
+			Str("period_end", payload.PeriodEnd).
+			Msg("ReportHandler: invalid period_end")
+		http.Error(w, "period_end must be a valid RFC3339 timestamp", http.StatusBadRequest)
+		return
+	}
+	periodStart, _ := time.Parse(time.RFC3339, payload.PeriodStart)
+	periodEnd, _ := time.Parse(time.RFC3339, payload.PeriodEnd)
+	if !periodEnd.After(periodStart) {
+		log.Error().Str("request_id", payload.RequestID).
+			Msg("ReportHandler: period_end must be after period_start")
+		http.Error(w, "period_end must be after period_start", http.StatusBadRequest)
+		return
+	}
+	if payload.ReportType == "high_severity" && len(payload.IncidentIDs) == 0 {
+		log.Error().Str("request_id", payload.RequestID).Msg("ReportHandler: high_severity requires incident_ids")
+		http.Error(w, "incident_ids is required for high_severity reports", http.StatusBadRequest)
+		return
+	}
+
 	log.Debug().
 		Str("request_id", payload.RequestID).
 		Str("report_type", payload.ReportType).
@@ -162,9 +208,22 @@ func (h *Handler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Debug().Str("path", r.URL.Path).Msg("StatusHandler: requested")
+
+	// Gather circuit breaker states per channel
+	cbStates := make(map[string]interface{})
+	for _, channel := range []string{"discord", "telegram", "email", "prometheus"} {
+		cb := h.reporter.CircuitBreakerFor(channel)
+		snap := cb.Snapshot()
+		cbStates[channel] = map[string]interface{}{
+			"state":    snap.State,
+			"failures": snap.Failures,
+		}
+	}
+
 	writeJSON(w, map[string]interface{}{
-		"uptime":  time.Since(h.reporter.StartTime()).String(),
-		"version": "1.0.0",
+		"uptime":             time.Since(h.reporter.StartTime()).String(),
+		"version":            "1.0.0",
+		"circuit_breakers":   cbStates,
 	})
 }
 
@@ -176,4 +235,29 @@ func (h *Handler) MetricsHandler() http.Handler {
 // Reporter returns the reporter instance
 func (h *Handler) Reporter() *service.Reporter {
 	return h.reporter
+}
+
+// RetryStalledDeliveriesHandler recovers stalled delivery attempts and triggers
+// a retry sweep. Used by the scheduler or an operator to recover from leaked
+// leases.
+func (h *Handler) RetryStalledDeliveriesHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		log.Error().Str("method", r.Method).Str("path", r.URL.Path).
+			Msg("RetryStalledDeliveriesHandler: method not allowed")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	count, err := h.reporter.RecoverStalledDeliveries(r.Context())
+	if err != nil {
+		log.Error().Err(err).Msg("RetryStalledDeliveriesHandler: failed to recover stalled deliveries")
+		http.Error(w, fmt.Sprintf("Failed to recover stalled deliveries: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"recovered": count,
+		"message":   "Stalled delivery attempts recovered",
+	})
 }

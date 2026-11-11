@@ -66,26 +66,35 @@ type ReporterConfig struct {
 
 // Reporter holds the database connection and reporting logic
 type Reporter struct {
-	db         *sql.DB
-	config     ReporterConfig
-	metrics    *metrics.Metrics
-	httpClient *http.Client
-	ctx        context.Context
-	cancelFunc context.CancelFunc
-	startTime  time.Time
+	db             *sql.DB
+	config         ReporterConfig
+	metrics        *metrics.Metrics
+	httpClient     *http.Client
+	ctx            context.Context
+	cancelFunc     context.CancelFunc
+	startTime      time.Time
+	circuitBreakers map[string]*CircuitBreaker
+	cbMu           sync.Mutex
 }
 
 // NewReporter creates a new reporter instance
 func NewReporter(db *sql.DB, cfg ReporterConfig, m *metrics.Metrics) *Reporter {
 	ctx, cancel := context.WithCancel(context.Background())
+	cbMap := make(map[string]*CircuitBreaker)
+	// Circuit breaker per delivery channel: trip after 3 consecutive failures,
+	// stay open for 30 seconds before allowing a single trial call.
+	for _, channel := range []string{"discord", "telegram", "email", "prometheus"} {
+		cbMap[channel] = NewCircuitBreaker(3, 30*time.Second)
+	}
 	return &Reporter{
-		db:         db,
-		config:     cfg,
-		metrics:    m,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
-		ctx:        ctx,
-		cancelFunc: cancel,
-		startTime:  time.Now(),
+		db:             db,
+		config:         cfg,
+		metrics:        m,
+		httpClient:     &http.Client{Timeout: 10 * time.Second},
+		ctx:            ctx,
+		cancelFunc:     cancel,
+		startTime:      time.Now(),
+		circuitBreakers: cbMap,
 	}
 }
 
@@ -182,7 +191,7 @@ func (r *Reporter) ProcessReportRequest(ctx context.Context, payload models.Repo
 
 	// Send report via configured channels (async)
 	go func() {
-		r.deliverReport(report)
+		r.deliverReport(ctx, report)
 	}()
 
 	log.Info().
@@ -838,9 +847,7 @@ func (r *Reporter) createDeliveryAttempts(ctx context.Context, report models.Rep
 }
 
 // deliverReport delivers the report via all configured channels
-func (r *Reporter) deliverReport(report models.Report) {
-	ctx := context.Background()
-
+func (r *Reporter) deliverReport(ctx context.Context, report models.Report) {
 	channels := []struct {
 		name           string
 		sendFunc       func(context.Context, models.Report) error
@@ -874,7 +881,17 @@ func (r *Reporter) deliverChannel(ctx context.Context, report models.Report, cha
 	maxAttempts := 3
 	baseDelay := 10 * time.Second
 
+	cb := r.circuitBreakerFor(channel)
+
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Circuit breaker: skip if channel is open
+		if !cb.Allow() {
+			log.Warn().Str("channel", channel).Str("report_id", report.ID).
+				Msg("Circuit breaker open, skipping delivery attempt")
+			r.metrics.DeliveryTotal.WithLabelValues(channel, "circuit_open").Inc()
+			return
+		}
+
 		// Claim the delivery attempt
 		attemptID, err := r.claimDeliveryAttempt(ctx, report.ID, channel, destinationKey)
 		if err != nil {
@@ -893,6 +910,8 @@ func (r *Reporter) deliverChannel(ctx context.Context, report models.Report, cha
 
 		if err == nil {
 			// Success
+			cb.OnSuccess()
+			r.metrics.DeliveryTotal.WithLabelValues(channel, "sent").Inc()
 			if updateErr := r.updateDeliveryAttemptStatus(ctx, attemptID, models.DeliveryStatusSent, attempt, "", nil); updateErr != nil {
 				log.Error().Err(updateErr).Str("channel", channel).Str("report_id", report.ID).Msg("Failed to update delivery attempt status")
 			}
@@ -902,6 +921,8 @@ func (r *Reporter) deliverChannel(ctx context.Context, report models.Report, cha
 
 		// Check if error is retryable
 		if r.isRetryableError(err) && attempt < maxAttempts {
+			cb.OnFailure()
+			r.metrics.DeliveryTotal.WithLabelValues(channel, "retryable").Inc()
 			// Schedule retry
 			delay := baseDelay * time.Duration(attempt)
 			nextAttempt := time.Now().Add(delay)
@@ -914,6 +935,8 @@ func (r *Reporter) deliverChannel(ctx context.Context, report models.Report, cha
 		}
 
 		// Terminal failure
+		cb.OnFailure()
+		r.metrics.DeliveryTotal.WithLabelValues(channel, "failed_terminal").Inc()
 		safeErrorCode := r.classifyError(err)
 		if updateErr := r.updateDeliveryAttemptStatus(ctx, attemptID, models.DeliveryStatusFailedTerminal, attempt, safeErrorCode, nil); updateErr != nil {
 			log.Error().Err(updateErr).Str("channel", channel).Str("report_id", report.ID).Msg("Failed to update delivery attempt status")
@@ -1317,7 +1340,7 @@ func (r *Reporter) sendToTelegram(ctx context.Context, report models.Report) err
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(r.ctx, http.MethodPost, url, strings.NewReader(string(payloadBytes)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(payloadBytes)))
 	if err != nil {
 		return err
 	}
@@ -1341,7 +1364,7 @@ func (r *Reporter) sendToTelegram(ctx context.Context, report models.Report) err
 }
 
 // sendToEmail sends the report via SMTP
-func (r *Reporter) sendToEmail(_ context.Context, report models.Report) error {
+func (r *Reporter) sendToEmail(ctx context.Context, report models.Report) error {
 	if r.config.EmailSMTPHost == "" || r.config.EmailUsername == "" || r.config.EmailPassword == "" {
 		return nil
 	}
@@ -1377,7 +1400,7 @@ func (r *Reporter) sendToEmail(_ context.Context, report models.Report) error {
 	msg.SetBodyString(mail.TypeTextHTML, htmlBody)
 
 	// Send email with context
-	emailCtx, cancel := context.WithTimeout(r.ctx, 10*time.Second)
+	emailCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	if err := client.DialAndSendWithContext(emailCtx, msg); err != nil {
@@ -1388,7 +1411,50 @@ func (r *Reporter) sendToEmail(_ context.Context, report models.Report) error {
 	return nil
 }
 
-// StartTime returns the start time
+// CircuitBreakerFor returns the circuit breaker for the given channel for observability.
+func (r *Reporter) CircuitBreakerFor(channel string) *CircuitBreaker {
+	return r.circuitBreakerFor(channel)
+}
+
+// circuitBreakerFor returns the circuit breaker for the given channel, creating it lazily.
+func (r *Reporter) circuitBreakerFor(channel string) *CircuitBreaker {
+	r.cbMu.Lock()
+	defer r.cbMu.Unlock()
+	cb, ok := r.circuitBreakers[channel]
+	if !ok {
+		cb = NewCircuitBreaker(3, 30*time.Second)
+		r.circuitBreakers[channel] = cb
+	}
+	return cb
+}
+
+// RecoverStalledDeliveries reclaims delivery attempts whose lease has expired
+// but are still in 'sending' state, resetting them to 'pending' so they can be
+// retried. Returns the number of recovered attempts.
+func (r *Reporter) RecoverStalledDeliveries(ctx context.Context) (int, error) {
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE delivery_attempts
+		SET status = 'pending',
+		    attempts = attempts - 1,
+		    lease_expires_at = NULL,
+		    updated_at = now()
+		WHERE status = 'sending'
+		  AND lease_expires_at IS NOT NULL
+		  AND lease_expires_at < now()
+	`)
+	if err != nil {
+		return 0, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if count > 0 {
+		r.metrics.StalledDeliveriesTotal.Add(float64(count))
+		log.Info().Int64("recovered", count).Msg("Recovered stalled delivery attempts")
+	}
+	return int(count), nil
+}
 func (r *Reporter) StartTime() time.Time {
 	return r.startTime
 }

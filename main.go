@@ -82,6 +82,12 @@ func main() {
 
 	log.Info().Msg("Connected to database successfully")
 
+	// Database pool tuning: cap open connections, keep a small idle pool,
+	// and recycle connections after 30 minutes to avoid stale connections.
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
+
 	// Initialize metrics
 	m := metrics.NewMetrics()
 
@@ -98,6 +104,7 @@ func main() {
 	// V1 API endpoints
 	r.HandleFunc("/api/v1/reports", h.ReportHandler)
 	r.HandleFunc("/api/v1/status", h.StatusHandler)
+	r.HandleFunc("/api/v1/retry-stalled-deliveries", h.RetryStalledDeliveriesHandler)
 	registerMetricsRoutes(r, h.MetricsHandler())
 
 	// Wrap router with middleware
@@ -106,10 +113,11 @@ func main() {
 	handler = middleware.ErrorLoggingMiddleware("pamawas-reporter", handler)
 
 	// Create server
-	writeTimeout := cfg.HighSeverityInvestigationTimeout + 2*time.Minute
-	if writeTimeout < 2*time.Minute {
-		writeTimeout = 2 * time.Minute
-	}
+	// Write timeout covers report generation and delivery initiation. The
+	// reporter no longer waits for investigation completion (that is the
+	// scheduler's follow-up responsibility), so this is a bounded write timeout
+	// rather than an investigation deadline.
+	writeTimeout := 2 * time.Minute
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
