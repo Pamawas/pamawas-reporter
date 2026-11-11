@@ -145,22 +145,22 @@ func (h *Handler) ReportHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "report_type must be 'daily' or 'high_severity'", http.StatusBadRequest)
 		return
 	}
-	if _, err := time.Parse(time.RFC3339, payload.PeriodStart); err != nil {
+	periodStart, err := time.Parse(time.RFC3339, payload.PeriodStart)
+	if err != nil {
 		log.Error().Err(err).Str("request_id", payload.RequestID).
 			Str("period_start", payload.PeriodStart).
 			Msg("ReportHandler: invalid period_start")
 		http.Error(w, "period_start must be a valid RFC3339 timestamp", http.StatusBadRequest)
 		return
 	}
-	if _, err := time.Parse(time.RFC3339, payload.PeriodEnd); err != nil {
+	periodEnd, err := time.Parse(time.RFC3339, payload.PeriodEnd)
+	if err != nil {
 		log.Error().Err(err).Str("request_id", payload.RequestID).
 			Str("period_end", payload.PeriodEnd).
 			Msg("ReportHandler: invalid period_end")
 		http.Error(w, "period_end must be a valid RFC3339 timestamp", http.StatusBadRequest)
 		return
 	}
-	periodStart, _ := time.Parse(time.RFC3339, payload.PeriodStart)
-	periodEnd, _ := time.Parse(time.RFC3339, payload.PeriodEnd)
 	if !periodEnd.After(periodStart) {
 		log.Error().Str("request_id", payload.RequestID).
 			Msg("ReportHandler: period_end must be after period_start")

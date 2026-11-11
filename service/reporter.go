@@ -372,7 +372,7 @@ func (r *Reporter) generateReportContent(
 
 	// Summary
 	totalIncidents := len(incidents)
-	needsAttention, resolved := countIncidentStatuses(incidents)
+	needsAttention, resolvedCount := countIncidentStatuses(incidents)
 
 	// Availability - only if we have a real metric
 	availability := r.getAvailabilityMetric(ctx, periodStart, periodEnd)
@@ -383,13 +383,25 @@ func (r *Reporter) generateReportContent(
 	}
 
 	fmt.Fprintf(&sb, "%d incidents occurred. %d need attention. %d resolved.\n\n",
-		totalIncidents, needsAttention, resolved)
+		totalIncidents, needsAttention, resolvedCount)
 
-	// Incident details
+	// Split incidents into unresolved (needs attention) and solved sections so
+	// the daily report clearly separates what still needs work from what is solved.
+	var unresolved, solved []models.Incident
+	for _, inc := range incidents {
+		switch inc.Status {
+		case "open", "investigating":
+			unresolved = append(unresolved, inc)
+		case "resolved":
+			solved = append(solved, inc)
+		}
+	}
+
+	// Incident details, divided into unresolved and solved sections
 	if r.config.ReportTemplate == "v2" {
-		writeIncidentDetailsV2(&sb, incidents, incidentEvidence, inclusionReasons, timezone)
+		writeIncidentDetailsV2(&sb, unresolved, solved, incidentEvidence, inclusionReasons, timezone)
 	} else {
-		writeIncidentDetails(&sb, incidents, incidentEvidence, inclusionReasons)
+		writeIncidentDetails(&sb, unresolved, solved, incidentEvidence, inclusionReasons)
 	}
 
 	fmt.Fprintf(&sb, "---\nTemplate: pamawas-report-%s | Generated: %s\n", r.config.ReportTemplate, time.Now().UTC().Format("2006-01-02 15:04:05 UTC"))
@@ -424,12 +436,27 @@ func countIncidentStatuses(incidents []models.Incident) (needsAttention, resolve
 }
 
 // writeIncidentDetails writes a formatted block for each incident including
-// its evidence findings.
-func writeIncidentDetails(sb *strings.Builder, incidents []models.Incident, incidentEvidence map[string][]models.Evidence, inclusionReasons map[string]string) {
-	if len(incidents) == 0 {
+// its evidence findings, divided into unresolved (needs attention) and solved
+// (resolved) sections.
+func writeIncidentDetails(sb *strings.Builder, unresolved, resolved []models.Incident, incidentEvidence map[string][]models.Evidence, inclusionReasons map[string]string) {
+	if len(unresolved) == 0 && len(resolved) == 0 {
 		sb.WriteString("No incidents detected.\n\n")
 		return
 	}
+
+	sb.WriteString("## Unresolved (needs attention)\n")
+	writeIncidentDetailsList(sb, unresolved, incidentEvidence, inclusionReasons)
+
+	if len(resolved) > 0 {
+		sb.WriteString("## Solved (resolved during period)\n")
+		writeIncidentDetailsList(sb, resolved, incidentEvidence, inclusionReasons)
+	}
+
+	sb.WriteString("\n")
+}
+
+// writeIncidentDetailsList renders a flat list of incidents (v1 template).
+func writeIncidentDetailsList(sb *strings.Builder, incidents []models.Incident, incidentEvidence map[string][]models.Evidence, inclusionReasons map[string]string) {
 	for _, inc := range incidents {
 		reasonLabel := inclusionReasonLabel(inclusionReasons[inc.ID])
 		fmt.Fprintf(sb, "📋 Incident: %s (%s)%s\n", inc.Title, inc.Status, reasonLabel)
@@ -532,12 +559,27 @@ func loadLocation(timezone string) *time.Location {
 
 // writeIncidentDetailsV2 renders incident details using Uptime Kuma-style card
 // layout: each incident is presented as a bordered card with status chip,
-// key metrics, and formatted investigation findings.
-func writeIncidentDetailsV2(sb *strings.Builder, incidents []models.Incident, incidentEvidence map[string][]models.Evidence, inclusionReasons map[string]string, timezone string) {
-	if len(incidents) == 0 {
+// key metrics, and formatted investigation findings. Incidents are split into
+// unresolved (needs attention) and solved (resolved) sections.
+func writeIncidentDetailsV2(sb *strings.Builder, unresolved, resolved []models.Incident, incidentEvidence map[string][]models.Evidence, inclusionReasons map[string]string, timezone string) {
+	if len(unresolved) == 0 && len(resolved) == 0 {
 		sb.WriteString("No incidents detected.\n\n")
 		return
 	}
+
+	sb.WriteString("## Unresolved (needs attention)\n")
+	writeIncidentCardListV2(sb, unresolved, incidentEvidence, inclusionReasons, timezone)
+
+	if len(resolved) > 0 {
+		sb.WriteString("## Solved (resolved during period)\n")
+		writeIncidentCardListV2(sb, resolved, incidentEvidence, inclusionReasons, timezone)
+	}
+
+	sb.WriteString("\n")
+}
+
+// writeIncidentCardListV2 renders a list of incidents as cards (v2 template).
+func writeIncidentCardListV2(sb *strings.Builder, incidents []models.Incident, incidentEvidence map[string][]models.Evidence, inclusionReasons map[string]string, timezone string) {
 	for _, inc := range incidents {
 		writeIncidentCardV2(sb, inc, incidentEvidence[inc.ID], inclusionReasons[inc.ID], timezone)
 		sb.WriteString("\n")
