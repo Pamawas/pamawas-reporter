@@ -1601,14 +1601,14 @@ func (r *Reporter) SendResolveNotification(ctx context.Context, payload models.R
 func formatResolveNotification(incidentID, title, severity, environment string, resolvedAt, startedAt time.Time) string {
 	var sb strings.Builder
 	sb.WriteString("✅ *Alert Resolved*\n")
-	sb.WriteString(fmt.Sprintf("Incident: %s (%s)\n", title, incidentID))
-	sb.WriteString(fmt.Sprintf("Severity: %s\n", severity))
-	sb.WriteString(fmt.Sprintf("Environment: %s\n", environment))
+	fmt.Fprintf(&sb, "Incident: %s (%s)\n", title, incidentID)
+	fmt.Fprintf(&sb, "Severity: %s\n", severity)
+	fmt.Fprintf(&sb, "Environment: %s\n", environment)
 	if !startedAt.IsZero() {
-		sb.WriteString(fmt.Sprintf("Started: %s\n", startedAt.UTC().Format(time.RFC3339)))
+		fmt.Fprintf(&sb, "Started: %s\n", startedAt.UTC().Format(time.RFC3339))
 	}
 	if !resolvedAt.IsZero() {
-		sb.WriteString(fmt.Sprintf("Resolved: %s\n", resolvedAt.UTC().Format(time.RFC3339)))
+		fmt.Fprintf(&sb, "Resolved: %s\n", resolvedAt.UTC().Format(time.RFC3339))
 	}
 	sb.WriteString("The alert has recovered and is no longer firing.")
 	return sb.String()
