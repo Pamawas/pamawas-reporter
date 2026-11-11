@@ -560,12 +560,26 @@ func writeIncidentCardV2(sb *strings.Builder, inc models.Incident, evList []mode
 		resolvedStr = resolvedLocal.Format("2006-01-02 15:04:05")
 	}
 
+	services := strings.Join(inc.AffectedServices, ", ")
+
+	// Full incident id (opaque) plus a short form for quick scanning.
 	idShort := inc.ID
 	if len(idShort) > 8 {
 		idShort = idShort[:8]
 	}
 
-	services := strings.Join(inc.AffectedServices, ", ")
+	// Human-readable context lines.
+	envLine := inc.Environment
+	if envLine == "" {
+		envLine = "unknown"
+	}
+	corrLine := inc.CorrelationPolicy
+	if inc.CorrelationVersion > 0 {
+		corrLine = fmt.Sprintf("%s (v%d)", corrLine, inc.CorrelationVersion)
+	}
+	if corrLine == "" {
+		corrLine = "none"
+	}
 
 	// Card border width based on content (min 60 chars)
 	borderWidth := 60
@@ -574,6 +588,15 @@ func writeIncidentCardV2(sb *strings.Builder, inc models.Incident, evList []mode
 	}
 	if len(statusBadge)+len(sevBadge)+len("Severity: ")+len(inc.Severity)+len(" | Services: ")+len(services) > borderWidth {
 		borderWidth = len(statusBadge) + len(sevBadge) + len("Severity: ") + len(inc.Severity) + len(" | Services: ") + len(services)
+	}
+	if len("🌍 Environment: ")+len(envLine) > borderWidth {
+		borderWidth = len("🌍 Environment: ") + len(envLine)
+	}
+	if len("🔗 Correlation: ")+len(corrLine) > borderWidth {
+		borderWidth = len("🔗 Correlation: ") + len(corrLine)
+	}
+	if len("🔖 ID: ")+len(inc.ID) > borderWidth {
+		borderWidth = len("🔖 ID: ") + len(inc.ID)
 	}
 
 	borderTop := "┌─" + strings.Repeat("─", borderWidth) + "─┐\n"
@@ -591,11 +614,14 @@ func writeIncidentCardV2(sb *strings.Builder, inc models.Incident, evList []mode
 	sb.WriteString(borderTop)
 	sb.WriteString(padLine(fmt.Sprintf("%s %s (%s)%s", statusBadge, inc.Title, inc.Status, reasonLabel)))
 	sb.WriteString(padLine(fmt.Sprintf("%s Severity: %s   |   Services: %s", sevBadge, inc.Severity, services)))
+	sb.WriteString(padLine(fmt.Sprintf("🌍 Environment: %s", envLine)))
+	sb.WriteString(padLine(fmt.Sprintf("🔗 Correlation: %s", corrLine)))
 	sb.WriteString(padLine(fmt.Sprintf("📅 Started: %s", startedStr)))
 	if resolvedStr != "" {
 		sb.WriteString(padLine(fmt.Sprintf("✅ Resolved: %s", resolvedStr)))
 	}
-	sb.WriteString(padLine(fmt.Sprintf("🔖 ID: %s", idShort)))
+	sb.WriteString(padLine(fmt.Sprintf("🔖 ID: %s", inc.ID)))
+	sb.WriteString(padLine(fmt.Sprintf("   short: %s", idShort)))
 
 	if len(evList) == 0 {
 		sb.WriteString(padLine("🔍 Investigation Findings: investigation unavailable"))
