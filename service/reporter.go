@@ -45,6 +45,9 @@ type ReporterConfig struct {
 	EmailPassword      string
 	EmailFrom          string
 	EmailTo            string
+	// HighSeverityThreshold is the minimum severity (inclusive) that triggers
+	// user-facing resolve notifications. "high" sends for high/critical only.
+	HighSeverityThreshold string
 	// HighSeverityInvestigationTimeout is how long the reporter waits for an
 	// incident's investigation to reach a terminal state before generating a
 	// high-severity report. This prevents reports from being generated before
@@ -546,6 +549,26 @@ func severityColor(severity string) string {
 		return "🔵"
 	}
 	return "⚪"
+}
+
+// severityRank returns the numeric rank for a severity string. Higher values
+// are more severe. Unknown/empty severities map to rank 0 so they never meet
+// a configured threshold.
+func severityRank(severity string) int {
+	switch strings.ToLower(severity) {
+	case "debug":
+		return 1
+	case "info":
+		return 2
+	case "warning":
+		return 3
+	case "high":
+		return 4
+	case "critical":
+		return 5
+	default:
+		return 0
+	}
 }
 
 // loadLocation returns a time.Location for the given timezone string, falling back to UTC.
@@ -1506,8 +1529,10 @@ func (r *Reporter) SendResolveNotification(ctx context.Context, payload models.R
 		return nil, err
 	}
 
-	// High/critical only: skip low-level alerts so we don't buzz for minor things.
-	if severity != "high" && severity != "critical" {
+	// Resolve notifications only for severity at or above the configured
+	// threshold (default "high" => high/critical only), so we don't buzz for
+	// low-level alerts.
+	if severityRank(severity) < severityRank(r.config.HighSeverityThreshold) {
 		return &models.ResolveNotificationResponse{
 			IncidentID: payload.IncidentID,
 			Sent:       false,

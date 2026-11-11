@@ -46,6 +46,7 @@ func NewHandler(db *sql.DB, cfg config.Config, m *metrics.Metrics) *Handler {
 		EmailPassword:                    cfg.EmailPassword,
 		EmailFrom:                        cfg.EmailFrom,
 		EmailTo:                          cfg.EmailTo,
+		HighSeverityThreshold:            cfg.HighSeverityThreshold,
 		HighSeverityInvestigationTimeout: cfg.HighSeverityInvestigationTimeout,
 		PrometheusURL:                    cfg.PrometheusURL,
 		AvailabilityMetric:               cfg.AvailabilityMetric,

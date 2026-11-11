@@ -22,6 +22,9 @@ type Config struct {
 	EmailPassword      string
 	EmailFrom          string
 	EmailTo            string
+	// HighSeverityThreshold is the minimum severity (inclusive) that triggers
+	// user-facing resolve notifications. "high" sends for high/critical only.
+	HighSeverityThreshold string
 	// HighSeverityInvestigationTimeout is how long the reporter waits for a
 	// high-severity incident's investigation to reach a terminal state before
 	// generating the report
@@ -90,6 +93,9 @@ func Load() Config {
 	if err := v.BindEnv("email_to", "EMAIL_TO", "PAMAWAS_REPORTER_EMAIL_TO"); err != nil {
 		panic(fmt.Sprintf("failed to bind EMAIL_TO env: %v", err))
 	}
+	if err := v.BindEnv("high_severity_threshold", "HIGH_SEVERITY_THRESHOLD", "PAMAWAS_REPORTER_HIGH_SEVERITY_THRESHOLD"); err != nil {
+		panic(fmt.Sprintf("failed to bind HIGH_SEVERITY_THRESHOLD env: %v", err))
+	}
 	if err := v.BindEnv("high_severity_investigation_timeout", "HighSeverityInvestigationTimeout", "PAMAWAS_REPORTER_HIGH_SEVERITY_INVESTIGATION_TIMEOUT"); err != nil {
 		panic(fmt.Sprintf("failed to bind HighSeverityInvestigationTimeout env: %v", err))
 	}
@@ -108,6 +114,7 @@ func Load() Config {
 	v.SetDefault("log_level", "info")
 	v.SetDefault("environment", "development")
 	v.SetDefault("email_smtp_port", 587)
+	v.SetDefault("high_severity_threshold", "high")
 	v.SetDefault("high_severity_investigation_timeout", "5m")
 	v.SetDefault("report_template", "v1")
 
@@ -132,6 +139,7 @@ func Load() Config {
 		EmailPassword:                    v.GetString("email_password"),
 		EmailFrom:                        v.GetString("email_from"),
 		EmailTo:                          v.GetString("email_to"),
+		HighSeverityThreshold:            v.GetString("high_severity_threshold"),
 		HighSeverityInvestigationTimeout: v.GetDuration("high_severity_investigation_timeout"),
 		PrometheusURL:                    v.GetString("prometheus_url"),
 		AvailabilityMetric:               v.GetString("availability_metric"),
