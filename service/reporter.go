@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -1477,6 +1478,218 @@ func (r *Reporter) sendToEmail(ctx context.Context, report models.Report) error 
 	}
 
 	log.Info().Str("smtp_host", r.config.EmailSMTPHost).Str("to", r.config.EmailTo).Msg("Email sent successfully")
+	return nil
+}
+
+// SendResolveNotification sends an "alert solved" notification for a resolved
+// incident via Discord/Telegram/Email. Only high/critical severity incidents
+// produce a user-facing notification; lower severities are skipped silently.
+func (r *Reporter) SendResolveNotification(ctx context.Context, payload models.ResolveNotificationPayload) (*models.ResolveNotificationResponse, error) {
+	var (
+		title       string
+		severity    string
+		environment string
+		resolvedAt  sql.NullTime
+		startedAt   time.Time
+	)
+	row := r.db.QueryRowContext(ctx, `SELECT title, severity, environment, resolved_at, started_at FROM incidents WHERE id = $1`, payload.IncidentID)
+	if err := row.Scan(&title, &severity, &environment, &resolvedAt, &startedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return &models.ResolveNotificationResponse{
+				IncidentID: payload.IncidentID,
+				Sent:       false,
+				Skipped:    true,
+				Reason:     "incident_not_found",
+				Message:    "incident not found",
+			}, nil
+		}
+		return nil, err
+	}
+
+	// High/critical only: skip low-level alerts so we don't buzz for minor things.
+	if severity != "high" && severity != "critical" {
+		return &models.ResolveNotificationResponse{
+			IncidentID: payload.IncidentID,
+			Sent:       false,
+			Skipped:    true,
+			Reason:     "severity_not_high_critical",
+			Message:    fmt.Sprintf("resolve notification skipped: severity %s is not high/critical", severity),
+		}, nil
+	}
+
+	msg := formatResolveNotification(payload.IncidentID, title, severity, environment, resolvedAt.Time, startedAt)
+
+	var sent bool
+	var firstErr error
+
+	// Send via all configured channels (best effort; failures are logged).
+	if r.config.DiscordWebhookURL != "" {
+		if err := r.sendResolveToDiscord(ctx, msg); err != nil {
+			log.Error().Err(err).Str("incident_id", payload.IncidentID).Msg("Discord resolve notification failed")
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else {
+			sent = true
+		}
+	}
+	if r.config.TelegramBotToken != "" && r.config.TelegramChatID != "" {
+		if err := r.sendResolveToTelegram(ctx, msg); err != nil {
+			log.Error().Err(err).Str("incident_id", payload.IncidentID).Msg("Telegram resolve notification failed")
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else {
+			sent = true
+		}
+	}
+	if r.config.EmailSMTPHost != "" && r.config.EmailUsername != "" && r.config.EmailPassword != "" {
+		if err := r.sendResolveToEmail(ctx, msg, title); err != nil {
+			log.Error().Err(err).Str("incident_id", payload.IncidentID).Msg("Email resolve notification failed")
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else {
+			sent = true
+		}
+	}
+
+	if !sent && firstErr != nil {
+		return &models.ResolveNotificationResponse{
+			IncidentID: payload.IncidentID,
+			Sent:       false,
+			Skipped:    false,
+			Reason:     "delivery_failed",
+			Message:    firstErr.Error(),
+		}, nil
+	}
+
+	return &models.ResolveNotificationResponse{
+		IncidentID: payload.IncidentID,
+		Sent:       sent,
+		Skipped:    false,
+		Message:    "resolve notification sent",
+	}, nil
+}
+
+// formatResolveNotification builds a human-readable alert-solved message.
+func formatResolveNotification(incidentID, title, severity, environment string, resolvedAt, startedAt time.Time) string {
+	var sb strings.Builder
+	sb.WriteString("✅ *Alert Resolved*\n")
+	sb.WriteString(fmt.Sprintf("Incident: %s (%s)\n", title, incidentID))
+	sb.WriteString(fmt.Sprintf("Severity: %s\n", severity))
+	sb.WriteString(fmt.Sprintf("Environment: %s\n", environment))
+	if !startedAt.IsZero() {
+		sb.WriteString(fmt.Sprintf("Started: %s\n", startedAt.UTC().Format(time.RFC3339)))
+	}
+	if !resolvedAt.IsZero() {
+		sb.WriteString(fmt.Sprintf("Resolved: %s\n", resolvedAt.UTC().Format(time.RFC3339)))
+	}
+	sb.WriteString("The alert has recovered and is no longer firing.")
+	return sb.String()
+}
+
+// sendResolveToDiscord sends an alert-resolved message via Discord webhook.
+func (r *Reporter) sendResolveToDiscord(ctx context.Context, content string) error {
+	if r.config.DiscordWebhookURL == "" {
+		return nil
+	}
+	payload := map[string]interface{}{
+		"content":  content,
+		"username": "Pamawas Alert",
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.config.DiscordWebhookURL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close Discord response body")
+		}
+	}()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("discord webhook returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// sendResolveToTelegram sends an alert-resolved message via Telegram Bot API.
+func (r *Reporter) sendResolveToTelegram(ctx context.Context, content string) error {
+	if r.config.TelegramBotToken == "" || r.config.TelegramChatID == "" {
+		return nil
+	}
+	telegramBase := r.config.TelegramAPIBaseURL
+	if telegramBase == "" {
+		telegramBase = "https://api.telegram.org"
+	}
+	url := fmt.Sprintf("%s/bot%s/sendMessage", telegramBase, r.config.TelegramBotToken)
+	payload := map[string]interface{}{
+		"chat_id": r.config.TelegramChatID,
+		"text":    content,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close Telegram response body")
+		}
+	}()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("telegram api returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// sendResolveToEmail sends an alert-resolved message via SMTP.
+func (r *Reporter) sendResolveToEmail(ctx context.Context, body, subject string) error {
+	if r.config.EmailSMTPHost == "" || r.config.EmailUsername == "" || r.config.EmailPassword == "" {
+		return nil
+	}
+	client, err := mail.NewClient(r.config.EmailSMTPHost,
+		mail.WithPort(r.config.EmailSMTPPort),
+		mail.WithSMTPAuth(mail.SMTPAuthPlain),
+		mail.WithUsername(r.config.EmailUsername),
+		mail.WithPassword(r.config.EmailPassword),
+		mail.WithTLSPortPolicy(mail.TLSMandatory),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create SMTP client: %w", err)
+	}
+	msg := mail.NewMsg()
+	if err := msg.From(r.config.EmailFrom); err != nil {
+		return fmt.Errorf("failed to set from address: %w", err)
+	}
+	if err := msg.To(r.config.EmailTo); err != nil {
+		return fmt.Errorf("failed to set to address: %w", err)
+	}
+	msg.Subject(subject)
+	msg.SetBodyString(mail.TypeTextPlain, body)
+	emailCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := client.DialAndSendWithContext(emailCtx, msg); err != nil {
+		return fmt.Errorf("failed to send email: %w", err)
+	}
+	log.Info().Str("smtp_host", r.config.EmailSMTPHost).Str("to", r.config.EmailTo).Msg("Resolve notification email sent successfully")
 	return nil
 }
 

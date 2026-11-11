@@ -261,3 +261,50 @@ func (h *Handler) RetryStalledDeliveriesHandler(w http.ResponseWriter, r *http.R
 		"message":   "Stalled delivery attempts recovered",
 	})
 }
+
+// ResolveNotificationHandler sends an "alert solved" notification for a resolved
+// incident. Only high/critical severity incidents produce a user-facing
+// notification; lower severities are skipped silently.
+func (h *Handler) ResolveNotificationHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		log.Error().Str("method", r.Method).Str("path", r.URL.Path).
+			Msg("ResolveNotificationHandler: method not allowed")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var payload models.ResolveNotificationPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		log.Error().Err(err).Str("path", r.URL.Path).
+			Msg("ResolveNotificationHandler: invalid request body")
+		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if payload.IncidentID == "" {
+		log.Error().Str("path", r.URL.Path).Msg("ResolveNotificationHandler: missing incident_id")
+		http.Error(w, "incident_id is required", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := h.reporter.SendResolveNotification(r.Context(), payload)
+	if err != nil {
+		log.Error().Err(err).
+			Str("request_id", payload.RequestID).
+			Str("incident_id", payload.IncidentID).
+			Msg("ResolveNotificationHandler: resolve notification failed")
+		http.Error(w, fmt.Sprintf("Resolve notification failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	log.Info().
+		Str("request_id", payload.RequestID).
+		Str("incident_id", payload.IncidentID).
+		Bool("sent", resp.Sent).
+		Bool("skipped", resp.Skipped).
+		Msg("ResolveNotificationHandler: resolve notification processed")
+
+	w.WriteHeader(http.StatusOK)
+	writeJSON(w, resp)
+}

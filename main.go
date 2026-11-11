@@ -104,6 +104,7 @@ func main() {
 	// V1 API endpoints
 	r.HandleFunc("/api/v1/reports", h.ReportHandler)
 	r.HandleFunc("/api/v1/status", h.StatusHandler)
+	r.HandleFunc("/api/v1/resolve-notification", h.ResolveNotificationHandler)
 	r.HandleFunc("/api/v1/retry-stalled-deliveries", h.RetryStalledDeliveriesHandler)
 	registerMetricsRoutes(r, h.MetricsHandler())
 

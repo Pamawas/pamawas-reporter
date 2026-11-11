@@ -277,6 +277,24 @@ type ReportFeedback struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// ResolveNotificationPayload represents a request to send an "alert solved"
+// notification for a resolved incident. Only high/critical severity incidents
+// produce a user-facing notification.
+type ResolveNotificationPayload struct {
+	IncidentID   string `json:"incident_id"`
+	RequestID    string `json:"request_id"`
+	ContractVersion int   `json:"contract_version"`
+}
+
+// ResolveNotificationResponse represents the response from the resolve-notification endpoint.
+type ResolveNotificationResponse struct {
+	IncidentID string `json:"incident_id"`
+	Sent       bool   `json:"sent"`
+	Skipped    bool   `json:"skipped"`
+	Reason     string `json:"reason,omitempty"`
+	Message    string `json:"message"`
+}
+
 // InvestigationReview represents a review of an investigation run
 type InvestigationReview struct {
 	ID             string    `json:"id"`
