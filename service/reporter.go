@@ -613,6 +613,7 @@ func writeIncidentCardV2(sb *strings.Builder, inc models.Incident, evList []mode
 
 	sb.WriteString(borderTop)
 	sb.WriteString(padLine(fmt.Sprintf("%s %s (%s)%s", statusBadge, inc.Title, inc.Status, reasonLabel)))
+	sb.WriteString(padLine(fmt.Sprintf("📛 Name: %s", inc.Title)))
 	sb.WriteString(padLine(fmt.Sprintf("%s Severity: %s   |   Services: %s", sevBadge, inc.Severity, services)))
 	sb.WriteString(padLine(fmt.Sprintf("🌍 Environment: %s", envLine)))
 	sb.WriteString(padLine(fmt.Sprintf("🔗 Correlation: %s", corrLine)))
