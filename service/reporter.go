@@ -193,9 +193,12 @@ func (r *Reporter) ProcessReportRequest(ctx context.Context, payload models.Repo
 		// Don't fail the whole operation for this
 	}
 
-	// Send report via configured channels (async)
+	// Send report via configured channels (async). Use the reporter's own
+	// background context (r.ctx) rather than the HTTP request context, so the
+	// delivery outlives the HTTP response and is not killed with "context canceled"
+	// when the handler returns 202.
 	go func() {
-		r.deliverReport(ctx, report)
+		r.deliverReport(r.ctx, report)
 	}()
 
 	log.Info().
