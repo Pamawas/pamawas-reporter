@@ -13,10 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestSendToDiscordChunks verifies that report content exceeding Discord's
-// 2000-character limit is split into multiple webhook calls, each within
-// the limit, so the full report is delivered instead of being rejected with
-// HTTP 400.
+// TestSendToDiscordChunks verifies report content exceeding Discord's 2000-char limit is split into multiple webhook calls.
 func TestSendToDiscordChunks(t *testing.T) {
 	fake := fakes.NewFakeDeliveryTransport()
 	server := fake.StartDiscordServer()
@@ -51,10 +48,7 @@ func TestSendToDiscordChunks(t *testing.T) {
 	}
 }
 
-// TestSendToDiscordRateLimitRetry verifies that when Discord returns HTTP 429
-// (rate limited) with a Retry-After header, the chunk is retried after the
-// requested delay and eventually succeeds. Without this, a 429 would abort
-// the entire batch and the report would never be delivered.
+// TestSendToDiscordRateLimitRetry verifies that a Discord HTTP 429 with a Retry-After header is retried after the delay and eventually succeeds.
 func TestSendToDiscordRateLimitRetry(t *testing.T) {
 	var attempts int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,8 +75,7 @@ func TestSendToDiscordRateLimitRetry(t *testing.T) {
 	require.GreaterOrEqual(t, attempts, 2, "expected at least 2 attempts (initial + retry)")
 }
 
-// TestSendToDiscordRateLimitExhausted verifies that when Discord rate-limits
-// persistently, the chunk fails after max retries and the error is returned.
+// TestSendToDiscordRateLimitExhausted verifies that persistent Discord rate-limiting fails the chunk after max retries.
 func TestSendToDiscordRateLimitExhausted(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "0")

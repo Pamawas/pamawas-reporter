@@ -22,22 +22,15 @@ type Config struct {
 	EmailPassword      string
 	EmailFrom          string
 	EmailTo            string
-	// HighSeverityThreshold is the minimum severity (inclusive) that triggers
-	// user-facing resolve notifications. "high" sends for high/critical only.
+	// Minimum severity (inclusive) that triggers resolve notifications ("high" sends for high/critical only).
 	HighSeverityThreshold string
-	// HighSeverityInvestigationTimeout is how long the reporter waits for a
-	// high-severity incident's investigation to reach a terminal state before
-	// generating the report
+	// How long to wait for investigation to complete before generating high-severity report. Zero disables the wait.
 	HighSeverityInvestigationTimeout time.Duration
-	// PrometheusURL is the base URL of the Prometheus server used to query
-	// availability metrics. When empty, availability is reported as unavailable.
+	// Base URL of Prometheus server for querying availability metrics.
 	PrometheusURL string
-	// AvailabilityMetric is the Prometheus metric name used to compute
-	// availability (e.g. "up"). When empty, availability is reported as
-	// unavailable.
+	// Prometheus metric name used to compute availability (e.g. "up").
 	AvailabilityMetric string
-	// ReportTemplate selects the report rendering template: "v1" (legacy
-	// plain text) or "v2" (Uptime Kuma-style card layout). Defaults to "v1".
+	// Report rendering template: "v1" (legacy plain text) or "v2" (Uptime Kuma-style card layout).
 	ReportTemplate string
 }
 

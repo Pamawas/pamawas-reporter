@@ -45,26 +45,17 @@ type ReporterConfig struct {
 	EmailPassword      string
 	EmailFrom          string
 	EmailTo            string
-	// HighSeverityThreshold is the minimum severity (inclusive) that triggers
-	// user-facing resolve notifications. "high" sends for high/critical only.
+	// Minimum severity (inclusive) that triggers resolve notifications ("high" sends for high/critical only).
 	HighSeverityThreshold string
-	// HighSeverityInvestigationTimeout is how long the reporter waits for an
-	// incident's investigation to reach a terminal state before generating a
-	// high-severity report. This prevents reports from being generated before
-	// investigation evidence is available. Zero disables the wait.
+	// How long to wait for investigation to complete before generating high-severity report. Zero disables the wait.
 	HighSeverityInvestigationTimeout time.Duration
-	// DiscordRateLimitDelay is the minimum delay between Discord webhook chunk sends.
-	// Set to 0 to use the default (1 second). Configure this to control pacing
-	// and avoid hitting Discord's ~5 messages per 5 seconds rate limit.
+	// Minimum delay between Discord webhook chunk sends. Default 1s. Set to 0 for default pacing.
 	DiscordRateLimitDelay time.Duration
-	// PrometheusURL is the base URL of the Prometheus server used to query
-	// availability metrics.
+	// Base URL of Prometheus server for querying availability metrics.
 	PrometheusURL string
-	// AvailabilityMetric is the Prometheus metric name used to compute
-	// availability (e.g. "up").
+	// Prometheus metric name used to compute availability (e.g. "up").
 	AvailabilityMetric string
-	// ReportTemplate selects the report rendering template: "v1" (legacy
-	// plain text) or "v2" (Uptime Kuma-style card layout). Defaults to "v1".
+	// Report rendering template: "v1" (legacy plain text) or "v2" (Uptime Kuma-style card layout).
 	ReportTemplate string
 }
 
@@ -145,10 +136,9 @@ func (r *Reporter) ProcessReportRequest(ctx context.Context, payload models.Repo
 		return nil, fmt.Errorf("unknown report type: %s", payload.ReportType)
 	}
 
-	// Load evidence for all selected incidents.
-	// Note: the scheduler now dispatches high-severity report requests only after
-	// investigations reach a terminal state (checkHighSeverityFollowUp), so the
-	// reporter does not block waiting for investigation completion here.
+	// Load evidence for all selected incidents. The scheduler dispatches high-severity
+	// report requests only after investigations reach a terminal state, so the reporter
+	// does not block waiting for investigation completion here.
 	incidentEvidence, err := r.loadEvidenceForIncidents(ctx, incidentIDs)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to load evidence for incidents")
@@ -193,10 +183,8 @@ func (r *Reporter) ProcessReportRequest(ctx context.Context, payload models.Repo
 		// Don't fail the whole operation for this
 	}
 
-	// Send report via configured channels (async). Use the reporter's own
-	// background context (r.ctx) rather than the HTTP request context, so the
-	// delivery outlives the HTTP response and is not killed with "context canceled"
-	// when the handler returns 202.
+	// Send report via configured channels (async). Use the reporter's own background
+	// context (r.ctx) so delivery outlives the HTTP response.
 	go func() {
 		r.deliverReport(r.ctx, report)
 	}()
@@ -248,7 +236,7 @@ func (r *Reporter) claimReportRequest(ctx context.Context, requestID string, _pe
 
 // selectDailyIncidents selects incidents for a daily report using lifecycle overlap
 func (r *Reporter) selectDailyIncidents(ctx context.Context, periodStart, periodEnd time.Time, _timezone string) ([]string, map[string]string, error) {
-	// Lifecycle overlap: incident [started_at, COALESCE(resolved_at, infinity)) overlaps [period_start, period_end)
+	// Incident overlap checks if [started_at, resolved_at) overlaps [period_start, period_end)
 	query := `
 		SELECT i.id, i.started_at, i.resolved_at, i.status
 		FROM incidents i
@@ -392,8 +380,7 @@ func (r *Reporter) generateReportContent(
 	fmt.Fprintf(&sb, "%d incidents occurred. %d need attention. %d resolved.\n\n",
 		totalIncidents, needsAttention, resolvedCount)
 
-	// Split incidents into unresolved (needs attention) and solved sections so
-	// the daily report clearly separates what still needs work from what is solved.
+	// Split incidents into unresolved (needs attention) and solved sections
 	var unresolved, solved []models.Incident
 	for _, inc := range incidents {
 		switch inc.Status {
@@ -442,9 +429,7 @@ func countIncidentStatuses(incidents []models.Incident) (needsAttention, resolve
 	return needsAttention, resolved
 }
 
-// writeIncidentDetails writes a formatted block for each incident including
-// its evidence findings, divided into unresolved (needs attention) and solved
-// (resolved) sections.
+// writeIncidentDetails writes a formatted block for each incident including its evidence findings.
 func writeIncidentDetails(sb *strings.Builder, unresolved, resolved []models.Incident, incidentEvidence map[string][]models.Evidence, inclusionReasons map[string]string) {
 	if len(unresolved) == 0 && len(resolved) == 0 {
 		sb.WriteString("No incidents detected.\n\n")
@@ -554,9 +539,7 @@ func severityColor(severity string) string {
 	return "⚪"
 }
 
-// severityRank returns the numeric rank for a severity string. Higher values
-// are more severe. Unknown/empty severities map to rank 0 so they never meet
-// a configured threshold.
+// severityRank returns the numeric rank for a severity string. Higher values are more severe. Unknown/empty map to 0.
 func severityRank(severity string) int {
 	switch strings.ToLower(severity) {
 	case "debug":
@@ -584,10 +567,7 @@ func loadLocation(timezone string) *time.Location {
 	return loc
 }
 
-// writeIncidentDetailsV2 renders incident details using Uptime Kuma-style card
-// layout: each incident is presented as a bordered card with status chip,
-// key metrics, and formatted investigation findings. Incidents are split into
-// unresolved (needs attention) and solved (resolved) sections.
+// writeIncidentDetailsV2 renders incident details as Uptime Kuma-style cards with status chips, key metrics, and investigation findings.
 func writeIncidentDetailsV2(sb *strings.Builder, unresolved, resolved []models.Incident, incidentEvidence map[string][]models.Evidence, inclusionReasons map[string]string, timezone string) {
 	if len(unresolved) == 0 && len(resolved) == 0 {
 		sb.WriteString("No incidents detected.\n\n")
@@ -613,7 +593,7 @@ func writeIncidentCardListV2(sb *strings.Builder, incidents []models.Incident, i
 	}
 }
 
-// writeIncidentCardV2 renders a single incident as a bordered Uptime Kuma-style card.
+// writeIncidentCardV2 renders a single incident as an Uptime Kuma-style card.
 func writeIncidentCardV2(sb *strings.Builder, inc models.Incident, evList []models.Evidence, inclusionReason string, timezone string) {
 	statusBadge := statusColor(inc.Status)
 	sevBadge := severityColor(inc.Severity)
@@ -1201,12 +1181,7 @@ func (r *Reporter) classifyError(err error) string {
 	}
 }
 
-// sendToDiscord sends the report to Discord via webhook
-// Discord's incoming webhook limits the "content" field to 2000 characters.
-// We chunk the content into 2000-char segments and send each as a separate
-// webhook call so the full report is delivered even if it exceeds the limit.
-// Rate limiting: Discord allows ~5 messages per 5 seconds per webhook.
-// We pace sends with a base delay and honor 429 retry_after headers.
+// sendToDiscord sends the report to Discord via webhook. Chunks content exceeding 2000 chars and honors 429 rate limits with pacing and retry_after.
 func (r *Reporter) sendToDiscord(ctx context.Context, report models.Report) error {
 	if r.config.DiscordWebhookURL == "" {
 		return nil
@@ -1221,8 +1196,7 @@ func (r *Reporter) sendToDiscord(ctx context.Context, report models.Report) erro
 	chunks := chunkString(report.Content, maxDiscordContent)
 
 	var firstErr error
-	// Discord rate limit: ~5 messages per 5 seconds = 1 message/second sustained
-	// Use a pacing delay between chunks to avoid triggering rate limits
+	// Rate limiting: Discord allows ~5 messages per 5 seconds per webhook. Use a pacing delay between chunks to avoid triggering rate limits
 	basePacingDelay := r.config.DiscordRateLimitDelay
 	if basePacingDelay <= 0 {
 		basePacingDelay = 1 * time.Second
