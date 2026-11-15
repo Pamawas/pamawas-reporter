@@ -37,6 +37,11 @@ type Config struct {
 	// service.NewReporter).
 	CircuitBreakerFailureThreshold int
 	CircuitBreakerResetTimeout     time.Duration
+
+	// Inbound HTTP rate limiting (design review P5). Applies per route;
+	// /healthz, /ready and /metrics are exempt.
+	RateLimitRPS   float64
+	RateLimitBurst int
 }
 
 func Load() Config {
@@ -112,6 +117,12 @@ func Load() Config {
 	if err := v.BindEnv("circuit_breaker_reset_timeout", "CIRCUIT_BREAKER_RESET_TIMEOUT"); err != nil {
 		panic(fmt.Sprintf("failed to bind CIRCUIT_BREAKER_RESET_TIMEOUT env: %v", err))
 	}
+	if err := v.BindEnv("rate_limit_rps", "RATE_LIMIT_RPS"); err != nil {
+		panic(fmt.Sprintf("failed to bind RATE_LIMIT_RPS env: %v", err))
+	}
+	if err := v.BindEnv("rate_limit_burst", "RATE_LIMIT_BURST"); err != nil {
+		panic(fmt.Sprintf("failed to bind RATE_LIMIT_BURST env: %v", err))
+	}
 
 	// Defaults
 	v.SetDefault("port", "8080")
@@ -123,6 +134,8 @@ func Load() Config {
 	v.SetDefault("report_template", "v1")
 	v.SetDefault("circuit_breaker_failure_threshold", 3)
 	v.SetDefault("circuit_breaker_reset_timeout", "30s")
+	v.SetDefault("rate_limit_rps", 10)
+	v.SetDefault("rate_limit_burst", 20)
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
@@ -152,6 +165,8 @@ func Load() Config {
 		ReportTemplate:                   v.GetString("report_template"),
 		CircuitBreakerFailureThreshold:   v.GetInt("circuit_breaker_failure_threshold"),
 		CircuitBreakerResetTimeout:       v.GetDuration("circuit_breaker_reset_timeout"),
+		RateLimitRPS:                     v.GetFloat64("rate_limit_rps"),
+		RateLimitBurst:                   v.GetInt("rate_limit_burst"),
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -185,6 +200,12 @@ func (c Config) Validate() error {
 	}
 	if c.EmailSMTPPort < 1 || c.EmailSMTPPort > 65535 {
 		return fmt.Errorf("email_smtp_port must be 1..65535, got %d", c.EmailSMTPPort)
+	}
+	if c.RateLimitRPS <= 0 {
+		return fmt.Errorf("rate_limit_rps must be positive, got %v", c.RateLimitRPS)
+	}
+	if c.RateLimitBurst < 1 {
+		return fmt.Errorf("rate_limit_burst must be >= 1, got %d", c.RateLimitBurst)
 	}
 	return nil
 }

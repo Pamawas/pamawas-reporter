@@ -63,6 +63,8 @@ func TestValidate(t *testing.T) {
 		EmailSMTPPort:                  587,
 		CircuitBreakerFailureThreshold: 3,
 		CircuitBreakerResetTimeout:     30 * time.Second,
+		RateLimitRPS:                   10,
+		RateLimitBurst:                 20,
 	}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
@@ -79,6 +81,8 @@ func TestValidate(t *testing.T) {
 		{"threshold", func() Config { c := valid; c.HighSeverityThreshold = "urgent"; return c }(), "high_severity_threshold"},
 		{"template", func() Config { c := valid; c.ReportTemplate = "v3"; return c }(), "report_template"},
 		{"smtp_port", func() Config { c := valid; c.EmailSMTPPort = 0; return c }(), "email_smtp_port"},
+		{"rate_rps", func() Config { c := valid; c.RateLimitRPS = 0; return c }(), "rate_limit_rps"},
+		{"rate_burst", func() Config { c := valid; c.RateLimitBurst = 0; return c }(), "rate_limit_burst"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
