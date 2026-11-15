@@ -1468,19 +1468,37 @@ func (r *Reporter) SendResolveAlert(ctx context.Context, payload models.AlertPay
 		}, nil
 	}
 
+	// Consume the firing claim. Only a resolve that finds an outstanding claim
+	// corresponds to a fire we announced, so this both releases the condition
+	// for a future re-fire and makes repeat `resolved` events a no-op.
+	announced, err := r.releaseAlertClaim(ctx, payload.DedupKey)
+	if err != nil {
+		return nil, err
+	}
+	if !announced {
+		return &models.AlertResponse{
+			Sent:    false,
+			Skipped: true,
+			Reason:  "no_outstanding_alert",
+			Message: "resolve ignored: no firing alert was sent for this condition",
+		}, nil
+	}
+
+	subject.PriorOccurrences = r.countPriorOccurrences(ctx, subject)
+	incidentID := r.lookupResolveIncident(ctx, subject)
 	sent, firstErr := r.deliverAlert(ctx, payload.DedupKey, alertContent{
 		Text:    formatResolvedAlertMessage(subject, resolvedAt),
 		Subject: "Alert resolved: " + subject.Title,
-		Embed:   buildResolvedAlertEmbed(subject, resolvedAt),
+		Embed:   buildResolvedAlertEmbed(subject, resolvedAt, incidentID),
 	})
 
-	// The alert resolved, so release the one-shot claim: if this condition
-	// fires again later it must alert again.
-	if relErr := r.releaseAlertClaim(ctx, payload.DedupKey); relErr != nil {
-		log.Error().Err(relErr).Str("dedup_key", payload.DedupKey).Msg("Failed to release alert claim on resolve")
-	}
-
 	if !sent && firstErr != nil {
+		// Restore the claim: the recovery was never announced, so a retry must
+		// be able to send it.
+		if reclaimErr := r.reclaimAlert(ctx, payload.DedupKey); reclaimErr != nil {
+			log.Error().Err(reclaimErr).Str("dedup_key", payload.DedupKey).
+				Msg("Failed to restore alert claim after resolve delivery failure")
+		}
 		return &models.AlertResponse{
 			Sent:    false,
 			Skipped: false,
@@ -1535,6 +1553,7 @@ func (r *Reporter) SendAlert(ctx context.Context, payload models.AlertPayload) (
 		}, nil
 	}
 
+	subject.PriorOccurrences = r.countPriorOccurrences(ctx, subject)
 	sent, firstErr := r.deliverAlert(ctx, payload.DedupKey, alertContent{
 		Text:    formatAlertMessage(subject),
 		Subject: "High-severity alert: " + subject.Title,
@@ -1544,7 +1563,7 @@ func (r *Reporter) SendAlert(ctx context.Context, payload models.AlertPayload) (
 	if !sent && firstErr != nil {
 		// Release the claim so a later re-fire can retry: an alert nobody
 		// received must not be recorded as delivered.
-		if relErr := r.releaseAlertClaim(ctx, payload.DedupKey); relErr != nil {
+		if _, relErr := r.releaseAlertClaim(ctx, payload.DedupKey); relErr != nil {
 			log.Error().Err(relErr).Str("dedup_key", payload.DedupKey).Msg("Failed to release alert claim after delivery failure")
 		}
 		return &models.AlertResponse{
@@ -1573,6 +1592,7 @@ func alertSubjectFrom(payload models.AlertPayload) alertSubject {
 		Target:      payload.Target,
 		Job:         payload.Job,
 		StartedAt:   parseAlertTime(payload.StartedAt),
+		AlertKey:    payload.DedupKey,
 	}
 }
 
@@ -1588,6 +1608,86 @@ func parseAlertTime(value string) time.Time {
 		return time.Time{}
 	}
 	return parsed
+}
+
+// countPriorOccurrences returns how many times this condition started in the
+// 24h before this alert.
+//
+// The identity is environment + affected entity + alert name, because alerting
+// is event-sourced and carries no incident id. Counting *prior* occurrences (strictly
+// earlier starts) is what makes the number a recurrence rather than a total,
+// and it is correct on both the firing and resolved paths: on fire the incident
+// does not exist yet, and on resolve the current incident started exactly at
+// this alert's start, so it is excluded either way.
+//
+// Best-effort: history is context, and failing to read it must never stop the
+// page from being delivered.
+func (r *Reporter) countPriorOccurrences(ctx context.Context, subject alertSubject) int {
+	affected := subject.Target
+	if affected == "" {
+		affected = subject.Services
+	}
+	if affected == "" || subject.Title == "" || subject.StartedAt.IsZero() {
+		return 0
+	}
+
+	var count int
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM incidents
+		WHERE environment = $1
+		  AND $2 = ANY(affected_services)
+		  AND title = $3
+		  AND started_at < $4
+		  AND started_at >= $4 - interval '24 hours'
+	`, subject.Environment, affected, subject.Title, subject.StartedAt).Scan(&count)
+	if err != nil {
+		log.Debug().Err(err).Str("target", affected).Msg("Recurrence count lookup failed")
+		return 0
+	}
+	return count
+}
+
+// lookupResolveIncident finds the incident a recovered alert belongs to.
+//
+// It returns the id only. The investigation has NOT finished by the time a
+// resolve is announced: the reporter is called straight from the resolved
+// webhook, and the scheduler dispatches the findings report only once the
+// investigation reaches a terminal state. Querying for a cause here would
+// almost always come back empty, so the card does not pretend to know one —
+// it links the incident and says the findings follow separately.
+//
+// Best-effort by design: failing to find the incident must never stop the
+// recovery from being announced.
+func (r *Reporter) lookupResolveIncident(ctx context.Context, subject alertSubject) string {
+	affected := subject.Target
+	if affected == "" {
+		affected = subject.Services
+	}
+	if affected == "" {
+		return ""
+	}
+
+	// The most recently started incident for this affected entity in the same
+	// environment is the one this alert belongs to. Alert time carries no
+	// incident id, so identity and timing are all there is to match on.
+	var incidentID string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id
+		FROM incidents
+		WHERE environment = $1
+		  AND $2 = ANY(affected_services)
+		  AND started_at <= $3
+		ORDER BY started_at DESC
+		LIMIT 1
+	`, subject.Environment, affected, subject.StartedAt).Scan(&incidentID)
+	if err != nil {
+		if err != sql.ErrNoRows {
+			log.Debug().Err(err).Str("target", affected).Msg("Resolve incident lookup failed")
+		}
+		return ""
+	}
+	return incidentID
 }
 
 // claimAlert atomically records that this alert condition has been notified.
@@ -1613,16 +1713,35 @@ func (r *Reporter) claimAlert(ctx context.Context, dedupKey string) (bool, error
 	return true, nil
 }
 
-// releaseAlertClaim removes the claim so a subsequent firing alerts again.
-// Called when an alert resolves, and when delivery failed entirely.
-func (r *Reporter) releaseAlertClaim(ctx context.Context, dedupKey string) error {
+// reclaimAlert restores a claim that was released before delivery failed, so a
+// retry can still announce the recovery.
+func (r *Reporter) reclaimAlert(ctx context.Context, dedupKey string) error {
+	_, err := r.claimAlert(ctx, dedupKey)
+	return err
+}
+
+// releaseAlertClaim removes the claim and reports whether one existed.
+//
+// The return value is what makes resolve notifications idempotent. The firing
+// alert creates the claim, so consuming one proves this resolve belongs to a
+// fire we actually announced. Grafana re-sends `resolved` every evaluation
+// interval just as it re-sends `firing`; without this check each repeat emitted
+// another "alert resolved" card for the same recovery.
+func (r *Reporter) releaseAlertClaim(ctx context.Context, dedupKey string) (bool, error) {
 	sum := sha256.Sum256([]byte(dedupKey))
 	keyHash := hex.EncodeToString(sum[:])
-	_, err := r.db.ExecContext(ctx, `
+	res, err := r.db.ExecContext(ctx, `
 		DELETE FROM idempotency_records
 		WHERE audience = 'reporter' AND caller = 'ingest' AND key_hash = $1
 	`, keyHash)
-	return err
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
 }
 
 // channelSender is one configured delivery channel.
@@ -1698,14 +1817,15 @@ func formatResolvedAlertMessage(subject alertSubject, resolvedAt time.Time) stri
 }
 
 // formatAlertMessage builds the immediate high-severity alert message for
-// channels that render text (Telegram, email). It is intentionally light: the
-// scheduler-owned follow-up report carries the investigation evidence.
+// channels that render text (Telegram, email). It carries identity only: the
+// investigation has not run yet, and the scheduler-owned follow-up report
+// carries the findings once it has.
 func formatAlertMessage(subject alertSubject) string {
 	var sb strings.Builder
 	sb.WriteString("🚨 *High Severity Alert*\n")
 	fmt.Fprintf(&sb, "Alert: %s\n", subject.Title)
 	sb.WriteString(subject.identityLines())
-	sb.WriteString("Investigation will follow up with findings once complete.")
+	sb.WriteString("Investigation is queued automatically; findings follow as a separate report once it completes.")
 	return sb.String()
 }
 

@@ -510,6 +510,15 @@ type alertSubject struct {
 	Target      string
 	Job         string
 	StartedAt   time.Time
+	// AlertKey is the dedup key backing the one-shot claim. It is the only
+	// stable identifier available at alert time, so it links the firing page,
+	// the resolved page, and the follow-up report.
+	AlertKey string
+	// PriorOccurrences is how many times this same condition (environment +
+	// affected entity + alert name) started in the 24h before this one. Zero
+	// means this is the first time today; a high number means the reader is
+	// looking at a chronic problem, which changes what they should do next.
+	PriorOccurrences int
 }
 
 // fields renders the identity block shared by the firing and resolved cards.
@@ -555,48 +564,146 @@ func trimAlertFields(fields []discordEmbedField) []discordEmbedField {
 	return fields
 }
 
+// recurrenceLine states how often this condition has recurred in the last 24h.
+//
+// It is the one piece of history that changes an on-call reader's decision: a
+// first occurrence is something to watch, a sixth tells them the last five were
+// never really fixed. Returns "" when there is no history to report.
+func (s alertSubject) recurrenceLine() string {
+	if s.PriorOccurrences <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("🔁 **%s occurrence** in the last 24h — this condition keeps recurring.",
+		ordinal(s.PriorOccurrences+1))
+}
+
+// ordinal renders 1 -> "1st", 2 -> "2nd", 22 -> "22nd".
+func ordinal(n int) string {
+	suffix := "th"
+	// 11, 12 and 13 take "th" despite their last digit.
+	if n%100 < 11 || n%100 > 13 {
+		switch n % 10 {
+		case 1:
+			suffix = "st"
+		case 2:
+			suffix = "nd"
+		case 3:
+			suffix = "rd"
+		}
+	}
+	return fmt.Sprintf("%d%s", n, suffix)
+}
+
 // buildAlertEmbed renders the immediate high-severity alert as a card.
 //
 // This is the firing notification: it carries the subject's identity and says
 // the investigation will follow up. The follow-up report arrives later as its
 // own cards with the findings.
 func buildAlertEmbed(subject alertSubject) discordEmbed {
-	fields := trimAlertFields(subject.fields())
+	fields := subject.fields()
+	// "Firing for" is the urgency signal: a 30-second blip and a 40-minute
+	// outage read identically from a start timestamp alone, and the reader
+	// would have to subtract it from the clock to find out which this is.
+	// It also completes the inline grid at two full rows of three.
+	if !subject.StartedAt.IsZero() {
+		fields = append(fields, discordEmbedField{
+			Name:   "Firing for",
+			Value:  time.Since(subject.StartedAt).Round(time.Second).String(),
+			Inline: true,
+		})
+	}
+	fields = trimAlertFields(fields)
+
+	// State what the system is actually doing. The previous line promised
+	// "findings once complete", which told a paged engineer nothing they could
+	// act on and implied progress that had not started yet.
+	description := "🔍 Investigation starts automatically once the incident is correlated. Findings follow as a separate report."
+	if recurrence := subject.recurrenceLine(); recurrence != "" {
+		description = recurrence + "\n\n" + description
+	}
+
 	return discordEmbed{
 		Title:       truncateRunes("🚨 "+subject.Title, discordMaxTitle),
-		Description: "🔍 Investigation will follow up with findings once complete.",
+		Description: truncateRunes(description, discordMaxDescription),
 		Color:       severityEmbedColor(subject.Severity),
 		Fields:      fields,
+		Footer:      alertFooter(subject.AlertKey),
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}
 }
 
-// buildResolvedAlertEmbed renders the alert-resolved message as a card.
-func buildResolvedAlertEmbed(subject alertSubject, resolvedAt time.Time) discordEmbed {
-	fields := subject.fields()
-	if !resolvedAt.IsZero() {
-		fields = append(fields,
-			discordEmbedField{
-				Name:   "Resolved",
-				Value:  resolvedAt.UTC().Format("2006-01-02 15:04:05 UTC"),
-				Inline: true,
-			},
-			discordEmbedField{
-				Name:   "Downtime",
-				Value:  resolvedAt.Sub(subject.StartedAt).Round(time.Second).String(),
-				Inline: true,
-			},
-		)
+// alertFooter records the alert's correlation key. No incident exists yet when
+// an alert fires, so this key is what lets the follow-up report be matched to
+// the page that started it.
+func alertFooter(alertKey string) *discordEmbedFooter {
+	if alertKey == "" {
+		return nil
 	}
+	return &discordEmbedFooter{
+		Text: truncateRunes("Alert key: "+alertKey, discordMaxFooter),
+	}
+}
+
+// buildResolvedAlertEmbed renders the alert-resolved message as a card.
+//
+// The description states the one fact the fields cannot: how long it was out.
+// It used to read "The alert has recovered and is no longer firing.", which
+// repeated both the ✅ title and the Resolved field without adding anything.
+// Downtime is folded into that sentence rather than kept as a seventh field,
+// which would wrap alone onto its own row (Discord fits three inline fields per
+// row) and made the card look unfinished.
+// buildResolvedAlertEmbed renders the alert-resolved message as a card.
+//
+// The description states the one fact the fields cannot: how long it was out.
+// It used to read "The alert has recovered and is no longer firing.", which
+// repeated both the ✅ title and the Resolved field without adding anything.
+// Downtime is folded into that sentence rather than kept as a seventh field,
+// which would wrap alone onto its own row (Discord fits three inline fields per
+// row) and made the card look unfinished.
+//
+// It deliberately reports no cause: the investigation is still running when a
+// resolve is announced, and the findings report follows separately. Saying so
+// is better than leaving the reader to wonder where the analysis is.
+func buildResolvedAlertEmbed(subject alertSubject, resolvedAt time.Time, incidentID string) discordEmbed {
+	fields := subject.fields()
+	description := "Recovered."
+	if !resolvedAt.IsZero() {
+		fields = append(fields, discordEmbedField{
+			Name:   "Resolved",
+			Value:  resolvedAt.UTC().Format("2006-01-02 15:04:05 UTC"),
+			Inline: true,
+		})
+		if !subject.StartedAt.IsZero() {
+			description = fmt.Sprintf("Recovered after **%s**.",
+				resolvedAt.Sub(subject.StartedAt).Round(time.Second))
+		}
+	}
+	if recurrence := subject.recurrenceLine(); recurrence != "" {
+		// On a recovery this matters as much as on the page: a condition that
+		// has already come back repeatedly is not fixed, whatever this
+		// particular recovery looks like.
+		description += "\n\n" + recurrence
+	}
+	description += "\n\n🔍 Investigation findings follow in a separate report."
 	fields = trimAlertFields(fields)
 
-	return discordEmbed{
+	embed := discordEmbed{
 		Title:       truncateRunes("✅ "+subject.Title, discordMaxTitle),
-		Description: "The alert has recovered and is no longer firing.",
+		Description: truncateRunes(description, discordMaxDescription),
 		Color:       discordColorResolved,
 		Fields:      fields,
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}
+	if incidentID != "" {
+		embed.Footer = &discordEmbedFooter{
+			Text: truncateRunes("Incident: "+incidentID, discordMaxFooter),
+		}
+	} else {
+		// No incident linked yet: keep the alert key so the page can still be
+		// matched to the report that follows.
+		embed.Footer = alertFooter(subject.AlertKey)
+	}
+	return embed
 }
 
 // severityEmbedColor maps a severity to its embed bar color.

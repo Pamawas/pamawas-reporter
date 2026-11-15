@@ -378,3 +378,104 @@ func buildSingleIncidentEmbedForTest(inc models.Incident, evList []models.Eviden
 	report := models.Report{TemplateVersion: "pamawas-report-v2", GeneratedAt: time.Now()}
 	return r.buildSingleIncidentEmbed(report, inc, evList, models.InclusionReasonHighSeverityImmediate)
 }
+
+// TestRepeatedResolveNotifiesOnce is the regression test for duplicate
+// "alert resolved" cards. Grafana re-sends `resolved` every evaluation
+// interval, exactly as it re-sends `firing`. The resolve consumes the firing
+// claim, so the first one notifies and every repeat finds nothing outstanding.
+func TestRepeatedResolveNotifiesOnce(t *testing.T) {
+	r, mock, calls := newAlertTestReporter(t, "high")
+
+	payload := models.AlertPayload{
+		Title:       "Monitoring Target Down",
+		Severity:    "critical",
+		Environment: "production",
+		Target:      "last-labs",
+		Job:         "docker_cadvisor",
+		StartedAt:   time.Now().Add(-5 * time.Minute).Format(time.RFC3339),
+		DedupKey:    "grafana:24188862b3fad691",
+	}
+
+	// The firing alert's claim is still outstanding: this resolve owns it.
+	mock.ExpectExec("DELETE FROM idempotency_records").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	resp, err := r.SendResolveAlert(context.Background(), payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.Sent {
+		t.Fatalf("expected the recovery to be announced, got %+v", resp)
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("expected 1 delivery, got %d", got)
+	}
+
+	// Grafana repeats the resolved notification; the claim is already consumed.
+	mock.ExpectExec("DELETE FROM idempotency_records").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	resp, err = r.SendResolveAlert(context.Background(), payload)
+	if err != nil {
+		t.Fatalf("unexpected error on repeat: %v", err)
+	}
+	if resp.Sent || !resp.Skipped || resp.Reason != "no_outstanding_alert" {
+		t.Fatalf("expected no_outstanding_alert skip, got %+v", resp)
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("repeat resolve produced a duplicate card (calls=%d)", got)
+	}
+}
+
+// TestResolvedCardFoldsDowntimeIntoTheSummary verifies the card keeps a clean
+// three-column grid: Downtime as a seventh field wrapped alone onto its own row.
+func TestResolvedCardFoldsDowntimeIntoTheSummary(t *testing.T) {
+	started := time.Date(2026, 11, 15, 13, 37, 20, 0, time.UTC)
+	embed := buildResolvedAlertEmbed(alertSubject{
+		Title: "Monitoring Target Down", Severity: "critical",
+		Environment: "production", Target: "last-labs", Job: "docker_cadvisor",
+		StartedAt: started,
+	}, started.Add(5*time.Minute+34*time.Second), "inc_abc123")
+
+	if !strings.Contains(embed.Description, "5m34s") {
+		t.Errorf("downtime must be stated in the summary, got %q", embed.Description)
+	}
+	if strings.Contains(embed.Description, "no longer firing") {
+		t.Errorf("description repeats the title and Resolved field: %q", embed.Description)
+	}
+	for _, f := range embed.Fields {
+		if f.Name == "Downtime" {
+			t.Error("downtime must not be a field; it wraps alone onto its own row")
+		}
+	}
+	// 5 identity fields + Resolved = two full rows of three.
+	if len(embed.Fields) != 6 {
+		t.Errorf("expected 6 fields for a clean grid, got %d: %+v", len(embed.Fields), embed.Fields)
+	}
+}
+
+// TestFiringCardStatesFiringDuration verifies the card carries the urgency
+// signal an on-call reader needs: a 30-second blip and a 40-minute outage read
+// identically from a start timestamp alone.
+func TestFiringCardStatesFiringDuration(t *testing.T) {
+	embed := buildAlertEmbed(alertSubject{
+		Title: "Monitoring Target Down", Severity: "critical", Environment: "production",
+		Target: "last-labs", Job: "docker_cadvisor",
+		StartedAt: time.Now().Add(-12 * time.Minute),
+	})
+
+	var firingFor string
+	for _, f := range embed.Fields {
+		if f.Name == "Firing for" {
+			firingFor = f.Value
+		}
+	}
+	if !strings.HasPrefix(firingFor, "12m") {
+		t.Errorf("expected a firing duration near 12m, got %q", firingFor)
+	}
+	// Six inline fields fill two rows of three; the duration must not dangle
+	// alone on a third row.
+	if len(embed.Fields)%3 != 0 {
+		t.Errorf("expected a full grid of inline fields, got %d", len(embed.Fields))
+	}
+}
