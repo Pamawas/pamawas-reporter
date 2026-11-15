@@ -479,3 +479,76 @@ func TestFiringCardStatesFiringDuration(t *testing.T) {
 		t.Errorf("expected a full grid of inline fields, got %d", len(embed.Fields))
 	}
 }
+
+// TestRecurrenceCountsPriorOccurrences verifies the counting rule: prior only,
+// within 24h, for the same environment + affected entity + alert name. Counting
+// from `started_at < this alert's start` is what makes it correct on both the
+// firing path (no incident exists yet) and the resolved path (the current
+// incident started exactly then, so it is excluded).
+func TestRecurrenceCountsPriorOccurrences(t *testing.T) {
+	r, mock := newMockReporter(t, ReporterConfig{HighSeverityThreshold: "high"})
+	started := time.Date(2026, 11, 15, 13, 37, 20, 0, time.UTC)
+	subject := alertSubject{
+		Title: "Monitoring Target Down", Environment: "production",
+		Target: "last-labs", StartedAt: started,
+	}
+
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM incidents").
+		WithArgs("production", "last-labs", "Monitoring Target Down", started).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
+
+	if got := r.countPriorOccurrences(context.Background(), subject); got != 3 {
+		t.Fatalf("expected 3 prior occurrences, got %d", got)
+	}
+}
+
+func TestRecurrenceSkipsWithoutAnIdentity(t *testing.T) {
+	r, _ := newMockReporter(t, ReporterConfig{HighSeverityThreshold: "high"})
+	// No target and no service: there is nothing to count, and the query must
+	// not run at all (no sqlmock expectation is set).
+	if got := r.countPriorOccurrences(context.Background(), alertSubject{
+		Title: "Kube Job Failed", Environment: "production", StartedAt: time.Now(),
+	}); got != 0 {
+		t.Fatalf("expected no count without an affected entity, got %d", got)
+	}
+}
+
+// TestRecurrenceRendersOnBothCards verifies the count reaches the reader on the
+// firing page and on the recovery, and that a first occurrence stays quiet.
+func TestRecurrenceRendersOnBothCards(t *testing.T) {
+	started := time.Now().Add(-3 * time.Minute)
+	base := alertSubject{
+		Title: "Monitoring Target Down", Severity: "critical",
+		Environment: "production", Target: "last-labs", Job: "docker_cadvisor",
+		StartedAt: started, AlertKey: "grafana:abc",
+	}
+
+	first := buildAlertEmbed(base)
+	if strings.Contains(first.Description, "occurrence") {
+		t.Errorf("a first occurrence should not be labelled as recurring: %q", first.Description)
+	}
+
+	base.PriorOccurrences = 3
+	recurring := buildAlertEmbed(base)
+	if !strings.Contains(recurring.Description, "4th occurrence") {
+		t.Errorf("expected '4th occurrence', got %q", recurring.Description)
+	}
+
+	resolved := buildResolvedAlertEmbed(base, started.Add(5*time.Minute), "inc_1")
+	if !strings.Contains(resolved.Description, "4th occurrence") {
+		t.Errorf("recovery must carry the recurrence too, got %q", resolved.Description)
+	}
+}
+
+func TestOrdinal(t *testing.T) {
+	cases := map[int]string{
+		1: "1st", 2: "2nd", 3: "3rd", 4: "4th",
+		11: "11th", 12: "12th", 13: "13th",
+		21: "21st", 22: "22nd", 23: "23rd", 24: "24th", 101: "101st",
+	}
+	for in, want := range cases {
+		if got := ordinal(in); got != want {
+			t.Errorf("ordinal(%d) = %q, want %q", in, got, want)
+		}
+	}
+}
