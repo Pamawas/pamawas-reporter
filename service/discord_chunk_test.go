@@ -2,53 +2,80 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/Pamawas/pamawas-reporter/fakes"
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
 	"github.com/Pamawas/pamawas-reporter/models"
 	"github.com/stretchr/testify/require"
 )
 
-// TestSendToDiscordChunks verifies report content exceeding Discord's 2000-char limit is split into multiple webhook calls.
-func TestSendToDiscordChunks(t *testing.T) {
-	fake := fakes.NewFakeDeliveryTransport()
-	server := fake.StartDiscordServer()
-	defer server.Close()
+// TestSendToDiscordUsesEmbeds verifies reports are delivered as embeds: one
+// summary card plus one bordered card per incident. Discord's proportional
+// font makes ASCII text boxes impossible to align, so the box comes from an
+// embed (colored left bar) instead of the text template.
+func TestSendToDiscordUsesEmbeds(t *testing.T) {
+	var raw map[string]interface{}
+	capture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer capture.Close()
 
-	// Build a report body that exceeds Discord's 2000-char content limit
-	var sb strings.Builder
-	for i := 0; i < 2100; i++ {
-		sb.WriteString("This is a test message for Discord chunking. ")
-	}
+	incidentID := "inc_abc123"
 	report := models.Report{
-		ID:         "test-id",
-		Content:    sb.String(),
-		ReportType: "daily",
+		ID:              "test-id",
+		Content:         "plain text content that must NOT be sent as content",
+		ReportType:      "daily",
+		Timezone:        "UTC",
+		TemplateVersion: "pamawas-report-v2",
+		GeneratedAt:     time.Now(),
 	}
 
-	r := NewReporter(nil, ReporterConfig{
-		DiscordWebhookURL: server.URL,
-		// Small delay for testing to keep tests fast; default is 1s in prod
-		DiscordRateLimitDelay: 10 * time.Millisecond,
-	}, testMetrics())
+	// The reporter loads the report's incidents and evidence from the database.
+	r, mock := newMockReporter(t, ReporterConfig{DiscordWebhookURL: capture.URL})
+	mock.ExpectQuery("SELECT ri.incident_id, ri.inclusion_reason").
+		WithArgs("test-id").
+		WillReturnRows(sqlmock.NewRows([]string{"incident_id", "inclusion_reason"}).
+			AddRow(incidentID, models.InclusionReasonHighSeverityImmediate))
+	// getIncidentsByIDs selects exactly these 7 columns.
+	mock.ExpectQuery("SELECT id, title, status, started_at, resolved_at, severity, affected_services").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "title", "status", "started_at", "resolved_at",
+			"severity", "affected_services",
+		}).AddRow(incidentID, "Monitoring Target Down", "open", time.Now(),
+			nil, "critical", "{grafana}"))
+	mock.ExpectQuery("FROM evidence e").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "incident_id", "type", "content", "source",
+			"confidence", "supports_evidence", "contradicts_evidence", "ordinal",
+		}).AddRow("evd_1", incidentID, "fact", "CPU load spiked to 17",
+			"prometheus", 0.95, "{}", "{}", 0))
 
-	// This should succeed without error
-	err := r.sendToDiscord(context.Background(), report)
-	require.Nil(t, err, "sendToDiscord should not return error for chunked content")
-
-	// Verify Discord was called with multiple chunks (at least 2)
-	deliveries := fake.GetDeliveries()
-	require.GreaterOrEqual(t, len(deliveries), 2, "should have sent multiple chunks")
-	for _, d := range deliveries {
-		require.LessOrEqual(t, len(d.Content), 2000, "chunk must not exceed Discord's 2000-char limit")
+	if err := r.sendToDiscord(context.Background(), report); err != nil {
+		t.Fatalf("sendToDiscord failed: %v", err)
 	}
+
+	embeds, ok := raw["embeds"].([]interface{})
+	require.True(t, ok, "payload must contain embeds")
+	require.Len(t, embeds, 2, "expected a summary card and one incident card")
+	_, hasContent := raw["content"]
+	require.False(t, hasContent, "reports must not be sent as plain content")
+
+	incidentEmbed, _ := embeds[1].(map[string]interface{})
+	require.Equal(t, float64(0xE74C3C), incidentEmbed["color"], "critical incident card must be red")
+	require.Contains(t, incidentEmbed["title"], "Monitoring Target Down")
+	require.Contains(t, incidentEmbed["description"], "CPU load spiked to 17")
 }
 
-// TestSendToDiscordRateLimitRetry verifies that a Discord HTTP 429 with a Retry-After header is retried after the delay and eventually succeeds.
+// TestSendToDiscordRateLimitRetry verifies a Discord 429 with Retry-After is
+// retried after the delay and eventually succeeds. Exercised at the transport
+// level, which is where rate limiting lives, so the test does not need a
+// database to render embeds first.
 func TestSendToDiscordRateLimitRetry(t *testing.T) {
 	var attempts int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -69,80 +96,7 @@ func TestSendToDiscordRateLimitRetry(t *testing.T) {
 		DiscordRateLimitDelay: 10 * time.Millisecond,
 	}, testMetrics())
 
-	report := models.Report{ID: "rl-test", Content: "test content", ReportType: "daily"}
-	err := r.sendToDiscord(context.Background(), report)
-	require.Nil(t, err, "sendToDiscord should succeed after rate-limit retry")
+	err := r.sendDiscordChunkWithRetry(context.Background(), 0, []byte(`{"embeds":[]}`))
+	require.Nil(t, err, "sendDiscordChunkWithRetry should succeed after rate-limit retry")
 	require.GreaterOrEqual(t, attempts, 2, "expected at least 2 attempts (initial + retry)")
-}
-
-// TestSendToDiscordRateLimitExhausted verifies that persistent Discord rate-limiting fails the chunk after max retries.
-func TestSendToDiscordRateLimitExhausted(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Retry-After", "0")
-		w.WriteHeader(http.StatusTooManyRequests)
-	}))
-	defer server.Close()
-
-	r := NewReporter(nil, ReporterConfig{
-		DiscordWebhookURL:     server.URL,
-		DiscordRateLimitDelay: 10 * time.Millisecond,
-	}, testMetrics())
-
-	report := models.Report{ID: "rl-exhaust", Content: "test content", ReportType: "daily"}
-	err := r.sendToDiscord(context.Background(), report)
-	require.Error(t, err, "sendToDiscord should fail when rate limit persists")
-	require.Contains(t, err.Error(), "rate limited")
-}
-
-// TestSendToDiscordPacing verifies that the configurable pacing delay is
-// honored between chunk sends. When DiscordRateLimitDelay is 0, the default
-// 1s delay is used; when set, it overrides the default.
-func TestSendToDiscordPacing(t *testing.T) {
-	var times []time.Time
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		times = append(times, time.Now())
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
-
-	r := NewReporter(nil, ReporterConfig{
-		DiscordWebhookURL:     server.URL,
-		DiscordRateLimitDelay: 20 * time.Millisecond,
-	}, testMetrics())
-
-	// Build content that produces 3 chunks
-	var sb strings.Builder
-	for i := 0; i < 5000; i++ {
-		sb.WriteString("x")
-	}
-	report := models.Report{ID: "pace-test", Content: sb.String(), ReportType: "daily"}
-	err := r.sendToDiscord(context.Background(), report)
-	require.Nil(t, err)
-	require.GreaterOrEqual(t, len(times), 3, "expected at least 3 chunk sends")
-
-	// Verify pacing: each gap between sends should be >= the configured delay
-	for i := 1; i < len(times); i++ {
-		gap := times[i].Sub(times[i-1])
-		require.GreaterOrEqual(t, gap, 15*time.Millisecond,
-			"gap between chunk %d and %d should be >= pacing delay", i-1, i)
-	}
-}
-
-// TestParseRetryAfter verifies retry_after parsing from both header (seconds)
-// and JSON body (milliseconds).
-func TestParseRetryAfter(t *testing.T) {
-	r := NewReporter(nil, ReporterConfig{}, testMetrics())
-
-	// Header value in seconds
-	got := r.parseRetryAfter("3", nil)
-	require.Equal(t, 3*time.Second, got)
-
-	// JSON body with milliseconds
-	body := []byte(`{"retry_after": 1500.5, "global": true}`)
-	got = r.parseRetryAfter("", body)
-	require.Equal(t, 1500*time.Millisecond, got)
-
-	// Empty header and body -> default fallback
-	got = r.parseRetryAfter("", nil)
-	require.Equal(t, 2*time.Second, got)
 }

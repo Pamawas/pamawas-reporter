@@ -72,11 +72,16 @@ func TestSendToDiscord(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	r, _ := newMockReporter(t, ReporterConfig{DiscordWebhookURL: server.URL})
-	if err := r.sendToDiscord(context.Background(), models.Report{Content: "hello"}); err != nil {
+	r, mock := newMockReporter(t, ReporterConfig{DiscordWebhookURL: server.URL})
+	// A report with no incidents still produces the summary card.
+	mock.ExpectQuery("SELECT ri.incident_id, ri.inclusion_reason").
+		WithArgs("rpt-1").
+		WillReturnRows(sqlmock.NewRows([]string{"incident_id", "inclusion_reason"}))
+	if err := r.sendToDiscord(context.Background(), models.Report{ID: "rpt-1"}); err != nil {
 		t.Fatal(err)
 	}
-	if payload["content"] != "hello" || payload["username"] != "Pamawas Reporter" {
+	embeds, ok := payload["embeds"].([]interface{})
+	if !ok || len(embeds) != 1 || payload["username"] != "Pamawas Reporter" {
 		t.Fatalf("payload = %#v", payload)
 	}
 }
@@ -84,8 +89,11 @@ func TestSendToDiscord(t *testing.T) {
 func TestSendToDiscordReturnsStatusError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusBadGateway) }))
 	defer server.Close()
-	r, _ := newMockReporter(t, ReporterConfig{DiscordWebhookURL: server.URL})
-	if err := r.sendToDiscord(context.Background(), models.Report{Content: "non-empty content"}); err == nil || !strings.Contains(err.Error(), "502") {
+	r, mock := newMockReporter(t, ReporterConfig{DiscordWebhookURL: server.URL})
+	mock.ExpectQuery("SELECT ri.incident_id, ri.inclusion_reason").
+		WithArgs("rpt-1").
+		WillReturnRows(sqlmock.NewRows([]string{"incident_id", "inclusion_reason"}))
+	if err := r.sendToDiscord(context.Background(), models.Report{ID: "rpt-1"}); err == nil || !strings.Contains(err.Error(), "502") {
 		t.Fatalf("error = %v", err)
 	}
 }

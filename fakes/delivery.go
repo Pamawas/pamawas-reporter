@@ -51,11 +51,18 @@ func (f *FakeDeliveryTransport) StartDiscordServer() *httptest.Server {
 			return
 		}
 
-		content, ok := payload["content"].(string)
-	if !ok {
-		http.Error(w, "invalid content field", http.StatusBadRequest)
-		return
-	}
+		// Discord accepts either plain content or embeds. Reports and alerts
+		// are sent as embeds (bordered cards); record a readable form so tests
+		// can assert on what a user would actually see.
+		content, _ := payload["content"].(string)
+		if content == "" {
+			embeds, _ := payload["embeds"].([]interface{})
+			if len(embeds) == 0 {
+				http.Error(w, "payload has neither content nor embeds", http.StatusBadRequest)
+				return
+			}
+			content = renderEmbedsForTest(embeds)
+		}
 
 		f.mu.Lock()
 		record := DeliveryRecord{
@@ -83,10 +90,10 @@ func (f *FakeDeliveryTransport) StartTelegramServer() *httptest.Server {
 		}
 
 		text, ok := payload["text"].(string)
-	if !ok {
-		http.Error(w, "invalid text field", http.StatusBadRequest)
-		return
-	}
+		if !ok {
+			http.Error(w, "invalid text field", http.StatusBadRequest)
+			return
+		}
 
 		f.mu.Lock()
 		record := DeliveryRecord{
@@ -237,13 +244,13 @@ type FakeEmailClient struct {
 
 // EmailRecord represents a captured email
 type EmailRecord struct {
-	From        string
-	To          []string
-	Subject     string
-	Body        string
-	HTMLBody    string
-	Timestamp   time.Time
-	Error       error
+	From      string
+	To        []string
+	Subject   string
+	Body      string
+	HTMLBody  string
+	Timestamp time.Time
+	Error     error
 }
 
 // NewFakeEmailClient creates a new fake email client
@@ -288,4 +295,33 @@ func (f *FakeEmailClient) GetEmailCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.emails)
+}
+
+// renderEmbedsForTest flattens an embed payload into readable text so tests can
+// assert on titles, field values, and descriptions.
+func renderEmbedsForTest(embeds []interface{}) string {
+	var sb strings.Builder
+	for _, raw := range embeds {
+		embed, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if title, ok := embed["title"].(string); ok {
+			sb.WriteString(title + "\n")
+		}
+		if desc, ok := embed["description"].(string); ok {
+			sb.WriteString(desc + "\n")
+		}
+		fields, _ := embed["fields"].([]interface{})
+		for _, f := range fields {
+			field, ok := f.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			name, _ := field["name"].(string)
+			value, _ := field["value"].(string)
+			sb.WriteString(name + ": " + value + "\n")
+		}
+	}
+	return sb.String()
 }

@@ -3,9 +3,11 @@ package service
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -118,5 +120,80 @@ func TestSendResolveAlertGatesOnSameThreshold(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(calls); got != 0 {
 		t.Fatalf("resolve delivery attempted %d times for below-threshold severity", got)
+	}
+}
+
+// TestAlertPathsUseEmbeds verifies both the firing alert and the resolved
+// alert render as bordered embeds, not plain text, and carry the right bar
+// color (severity-colored when firing, green once resolved).
+func TestAlertPathsUseEmbeds(t *testing.T) {
+	var payloads []map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		payloads = append(payloads, p)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	r, mock := newMockReporter(t, ReporterConfig{
+		DiscordWebhookURL:     server.URL,
+		HighSeverityThreshold: "high",
+	})
+
+	// Firing alert.
+	mock.ExpectQuery("SELECT title, severity, environment, started_at FROM incidents").
+		WithArgs("inc_crit").
+		WillReturnRows(sqlmock.NewRows([]string{"title", "severity", "environment", "started_at"}).
+			AddRow("Monitoring Target Down", "critical", "production", time.Now().Add(-time.Hour)))
+	mock.ExpectQuery("UPDATE incidents").
+		WithArgs("inc_crit").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("inc_crit"))
+
+	resp, err := r.SendAlert(context.Background(), models.AlertPayload{IncidentID: "inc_crit"})
+	if err != nil || !resp.Sent {
+		t.Fatalf("alert failed: resp=%+v err=%v", resp, err)
+	}
+
+	// Resolved alert.
+	mock.ExpectQuery("SELECT title, severity, environment, resolved_at, started_at FROM incidents").
+		WithArgs("inc_crit").
+		WillReturnRows(sqlmock.NewRows([]string{"title", "severity", "environment", "resolved_at", "started_at"}).
+			AddRow("Monitoring Target Down", "critical", "production", time.Now(), time.Now().Add(-time.Hour)))
+
+	resp, err = r.SendResolveAlert(context.Background(), models.AlertPayload{IncidentID: "inc_crit"})
+	if err != nil || !resp.Sent {
+		t.Fatalf("resolved alert failed: resp=%+v err=%v", resp, err)
+	}
+
+	if len(payloads) != 2 {
+		t.Fatalf("expected 2 webhook calls, got %d", len(payloads))
+	}
+	for i, p := range payloads {
+		if _, hasContent := p["content"]; hasContent {
+			t.Errorf("payload %d used plain content instead of embeds", i)
+		}
+		embeds, ok := p["embeds"].([]interface{})
+		if !ok || len(embeds) != 1 {
+			t.Fatalf("payload %d: expected exactly 1 embed, got %#v", i, p["embeds"])
+		}
+		embed := embeds[0].(map[string]interface{})
+		if i == 0 {
+			if embed["color"] != float64(0xE74C3C) {
+				t.Errorf("firing alert bar should be critical red, got %v", embed["color"])
+			}
+			if !strings.Contains(embed["title"].(string), "🚨") {
+				t.Errorf("firing alert title should carry the alarm marker: %v", embed["title"])
+			}
+		} else {
+			if embed["color"] != float64(0x2ECC71) {
+				t.Errorf("resolved alert bar should be green, got %v", embed["color"])
+			}
+			if !strings.Contains(embed["title"].(string), "✅") {
+				t.Errorf("resolved alert title should carry the check marker: %v", embed["title"])
+			}
+		}
 	}
 }

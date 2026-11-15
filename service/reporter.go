@@ -599,7 +599,12 @@ func writeIncidentCardListV2(sb *strings.Builder, incidents []models.Incident, i
 	}
 }
 
-// writeIncidentCardV2 renders a single incident as an Uptime Kuma-style card.
+// writeIncidentCardV2 renders a single incident as a readable card.
+//
+// This is the plain-text rendering used by Telegram and email. It deliberately
+// draws no ASCII box: Discord, Telegram and email all use proportional fonts,
+// so `┌─│└` characters never align and the "box" spills across the message.
+// Discord gets a real bordered card from embeds instead (see discord_embed.go).
 func writeIncidentCardV2(sb *strings.Builder, inc models.Incident, evList []models.Evidence, inclusionReason string, timezone string) {
 	statusBadge := statusColor(inc.Status)
 	sevBadge := severityColor(inc.Severity)
@@ -616,14 +621,10 @@ func writeIncidentCardV2(sb *strings.Builder, inc models.Incident, evList []mode
 	}
 
 	services := strings.Join(inc.AffectedServices, ", ")
-
-	// Full incident id (opaque) plus a short form for quick scanning.
-	idShort := inc.ID
-	if len(idShort) > 8 {
-		idShort = idShort[:8]
+	if services == "" {
+		services = "unknown"
 	}
 
-	// Human-readable context lines.
 	envLine := inc.Environment
 	if envLine == "" {
 		envLine = "unknown"
@@ -636,60 +637,27 @@ func writeIncidentCardV2(sb *strings.Builder, inc models.Incident, evList []mode
 		corrLine = "none"
 	}
 
-	// Card border width based on content (min 60 chars)
-	borderWidth := 60
-	if len(inc.Title)+len(statusBadge)+10 > borderWidth {
-		borderWidth = len(inc.Title) + len(statusBadge) + 10
-	}
-	if len(statusBadge)+len(sevBadge)+len("Severity: ")+len(inc.Severity)+len(" | Services: ")+len(services) > borderWidth {
-		borderWidth = len(statusBadge) + len(sevBadge) + len("Severity: ") + len(inc.Severity) + len(" | Services: ") + len(services)
-	}
-	if len("🌍 Environment: ")+len(envLine) > borderWidth {
-		borderWidth = len("🌍 Environment: ") + len(envLine)
-	}
-	if len("🔗 Correlation: ")+len(corrLine) > borderWidth {
-		borderWidth = len("🔗 Correlation: ") + len(corrLine)
-	}
-	if len("🔖 ID: ")+len(inc.ID) > borderWidth {
-		borderWidth = len("🔖 ID: ") + len(inc.ID)
-	}
-
-	borderTop := "┌─" + strings.Repeat("─", borderWidth) + "─┐\n"
-	borderBottom := "└─" + strings.Repeat("─", borderWidth) + "─┘\n"
-
-	// Pad a line to border width, guarding against content wider than the border
-	padLine := func(content string) string {
-		padding := borderWidth - len(content)
-		if padding < 0 {
-			padding = 0
-		}
-		return "│ " + content + strings.Repeat(" ", padding) + " │\n"
-	}
-
-	sb.WriteString(borderTop)
-	sb.WriteString(padLine(fmt.Sprintf("%s %s (%s)%s", statusBadge, inc.Title, inc.Status, reasonLabel)))
-	sb.WriteString(padLine(fmt.Sprintf("📛 Name: %s", inc.Title)))
-	sb.WriteString(padLine(fmt.Sprintf("%s Severity: %s   |   Services: %s", sevBadge, inc.Severity, services)))
-	sb.WriteString(padLine(fmt.Sprintf("🌍 Environment: %s", envLine)))
-	sb.WriteString(padLine(fmt.Sprintf("🔗 Correlation: %s", corrLine)))
-	sb.WriteString(padLine(fmt.Sprintf("📅 Started: %s", startedStr)))
+	fmt.Fprintf(sb, "%s **%s** (%s)%s\n", statusBadge, inc.Title, inc.Status, reasonLabel)
+	fmt.Fprintf(sb, "🔴 Severity: %s %s\n", sevBadge, inc.Severity)
+	fmt.Fprintf(sb, "🛠 Services: %s\n", services)
+	fmt.Fprintf(sb, "🌍 Environment: %s\n", envLine)
+	fmt.Fprintf(sb, "🔗 Correlation: %s\n", corrLine)
+	fmt.Fprintf(sb, "📅 Started: %s\n", startedStr)
 	if resolvedStr != "" {
-		sb.WriteString(padLine(fmt.Sprintf("✅ Resolved: %s", resolvedStr)))
+		fmt.Fprintf(sb, "✅ Resolved: %s\n", resolvedStr)
 	}
-	sb.WriteString(padLine(fmt.Sprintf("🔖 ID: %s", inc.ID)))
-	sb.WriteString(padLine(fmt.Sprintf("   short: %s", idShort)))
+	fmt.Fprintf(sb, "🔖 ID: `%s`\n", inc.ID)
 
 	if len(evList) == 0 {
-		sb.WriteString(padLine("🔍 Investigation Findings: investigation unavailable"))
+		sb.WriteString("🔍 Investigation Findings: investigation unavailable\n")
 	} else {
-		sb.WriteString(padLine("🔍 Investigation Findings:"))
+		sb.WriteString("🔍 **Investigation Findings:**\n")
 		for _, ev := range evList {
-			sb.WriteString(padLine(fmt.Sprintf("   %s %s (%.0f%%) %s",
-				evidenceIcon(ev.Type), strings.ToUpper(ev.Type), ev.Confidence*100, ev.Content)))
+			fmt.Fprintf(sb, "• %s %s (%.0f%%) %s\n",
+				evidenceIcon(ev.Type), strings.ToUpper(ev.Type), ev.Confidence*100, ev.Content)
 		}
 	}
 
-	sb.WriteString(borderBottom)
 	sb.WriteString("\n")
 }
 
@@ -1187,67 +1155,28 @@ func (r *Reporter) classifyError(err error) string {
 	}
 }
 
-// sendToDiscord sends the report to Discord via webhook. Chunks content exceeding 2000 chars and honors 429 rate limits with pacing and retry_after.
+// sendToDiscord sends the report to Discord as embeds: a summary card followed
+// by one bordered card per incident. Discord's proportional font makes text
+// boxes impossible to align, so the bordered card comes from embeds (colored
+// left bar + boxed body) rather than the text template.
 func (r *Reporter) sendToDiscord(ctx context.Context, report models.Report) error {
 	if r.config.DiscordWebhookURL == "" {
 		return nil
 	}
 
-	if strings.TrimSpace(report.Content) == "" {
-		log.Warn().Str("report_id", report.ID).Msg("Discord: report content is empty, nothing to send")
-		return nil
+	message, err := r.buildDiscordMessage(ctx, report)
+	if err != nil {
+		return fmt.Errorf("failed to render Discord embeds: %w", err)
 	}
 
-	const maxDiscordContent = 2000
-	chunks := chunkString(report.Content, maxDiscordContent)
-
-	var firstErr error
-	// Rate limiting: Discord allows ~5 messages per 5 seconds per webhook. Use a pacing delay between chunks to avoid triggering rate limits
-	basePacingDelay := r.config.DiscordRateLimitDelay
-	if basePacingDelay <= 0 {
-		basePacingDelay = 1 * time.Second
+	payloadBytes, err := json.Marshal(message)
+	if err != nil {
+		return fmt.Errorf("failed to marshal Discord payload: %w", err)
 	}
 
-	for i, chunk := range chunks {
-		payload := map[string]interface{}{
-			"content":  chunk,
-			"username": "Pamawas Reporter",
-		}
-		payloadBytes, err := json.Marshal(payload)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			log.Error().Err(err).Int("chunk", i).Msg("Failed to marshal Discord payload")
-			continue
-		}
-
-		// Per-chunk retry logic with 429 handling
-		chunkErr := r.sendDiscordChunkWithRetry(ctx, i, payloadBytes)
-		if chunkErr != nil {
-			if firstErr == nil {
-				firstErr = chunkErr
-			}
-			// Continue with remaining chunks even if one fails
-			// The error is logged inside sendDiscordChunkWithRetry
-			continue
-		}
-
-		// Pace between chunks to respect Discord's rate limit
-		// Skip delay after the last chunk
-		if i < len(chunks)-1 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(basePacingDelay):
-			}
-		}
+	if err := r.sendDiscordChunkWithRetry(ctx, 0, payloadBytes); err != nil {
+		return err
 	}
-
-	if firstErr != nil {
-		return firstErr
-	}
-
 	return nil
 }
 
@@ -1525,9 +1454,11 @@ func (r *Reporter) SendResolveAlert(ctx context.Context, payload models.AlertPay
 		}, nil
 	}
 
-	msg := formatResolvedAlertMessage(payload.IncidentID, title, severity, environment, resolvedAt.Time, startedAt)
-
-	sent, firstErr := r.deliverAlert(ctx, payload.IncidentID, msg, "Alert resolved: "+title)
+	sent, firstErr := r.deliverAlert(ctx, payload.IncidentID, alertContent{
+		Text:    formatResolvedAlertMessage(payload.IncidentID, title, severity, environment, resolvedAt.Time, startedAt),
+		Subject: "Alert resolved: " + title,
+		Embed:   buildResolvedAlertEmbed(payload.IncidentID, title, severity, environment, resolvedAt.Time, startedAt),
+	})
 
 	if !sent && firstErr != nil {
 		return &models.AlertResponse{
@@ -1617,8 +1548,11 @@ func (r *Reporter) SendAlert(ctx context.Context, payload models.AlertPayload) (
 		return nil, err
 	}
 
-	msg := formatAlertMessage(payload.IncidentID, title, severity, environment, startedAt)
-	sent, firstErr := r.deliverAlert(ctx, payload.IncidentID, msg, "High-severity alert: "+title)
+	sent, firstErr := r.deliverAlert(ctx, payload.IncidentID, alertContent{
+		Text:    formatAlertMessage(payload.IncidentID, title, severity, environment, startedAt),
+		Subject: "High-severity alert: " + title,
+		Embed:   buildAlertEmbed(payload.IncidentID, title, severity, environment, startedAt),
+	})
 
 	if !sent && firstErr != nil {
 		// Release the claim so a later re-fire can retry: an alert nobody
@@ -1644,9 +1578,18 @@ func (r *Reporter) SendAlert(ctx context.Context, payload models.AlertPayload) (
 }
 
 // channelSender is one configured delivery channel.
+// alertContent is one alert rendered for every channel: plain text for
+// Telegram/email, and a bordered embed for Discord. Both are built from the
+// same incident data so the channels never disagree.
+type alertContent struct {
+	Text    string
+	Subject string
+	Embed   discordEmbed
+}
+
 type channelSender struct {
 	channel string
-	send    func(ctx context.Context, content, subject string) error
+	send    func(ctx context.Context, content alertContent) error
 }
 
 // configuredChannelSenders returns the enabled channels. Channel
@@ -1654,18 +1597,18 @@ type channelSender struct {
 func (r *Reporter) configuredChannelSenders() []channelSender {
 	var senders []channelSender
 	if r.config.DiscordWebhookURL != "" {
-		senders = append(senders, channelSender{"discord", func(ctx context.Context, content, _ string) error {
-			return r.sendDiscordMessage(ctx, content)
+		senders = append(senders, channelSender{"discord", func(ctx context.Context, content alertContent) error {
+			return r.sendDiscordEmbed(ctx, content.Embed)
 		}})
 	}
 	if r.config.TelegramBotToken != "" && r.config.TelegramChatID != "" {
-		senders = append(senders, channelSender{"telegram", func(ctx context.Context, content, _ string) error {
-			return r.sendTelegramMessage(ctx, content)
+		senders = append(senders, channelSender{"telegram", func(ctx context.Context, content alertContent) error {
+			return r.sendTelegramMessage(ctx, content.Text)
 		}})
 	}
 	if r.config.EmailSMTPHost != "" && r.config.EmailUsername != "" && r.config.EmailPassword != "" {
-		senders = append(senders, channelSender{"email", func(ctx context.Context, content, subject string) error {
-			return r.sendEmailMessage(ctx, content, subject)
+		senders = append(senders, channelSender{"email", func(ctx context.Context, content alertContent) error {
+			return r.sendEmailMessage(ctx, content.Text, content.Subject)
 		}})
 	}
 	return senders
@@ -1673,11 +1616,11 @@ func (r *Reporter) configuredChannelSenders() []channelSender {
 
 // deliverAlert delivers one message to every configured channel,
 // best effort: a failing channel never suppresses the others.
-func (r *Reporter) deliverAlert(ctx context.Context, incidentID, content, subject string) (bool, error) {
+func (r *Reporter) deliverAlert(ctx context.Context, incidentID string, content alertContent) (bool, error) {
 	var sent bool
 	var firstErr error
 	for _, sender := range r.configuredChannelSenders() {
-		if err := sender.send(ctx, content, subject); err != nil {
+		if err := sender.send(ctx, content); err != nil {
 			log.Error().Err(err).
 				Str("channel", sender.channel).
 				Str("incident_id", incidentID).
@@ -1725,14 +1668,14 @@ func formatAlertMessage(incidentID, title, severity, environment string, started
 	return sb.String()
 }
 
-// sendDiscordMessage sends a notification message via Discord webhook.
-func (r *Reporter) sendDiscordMessage(ctx context.Context, content string) error {
+// sendDiscordEmbed sends a single alert card via Discord webhook.
+func (r *Reporter) sendDiscordEmbed(ctx context.Context, embed discordEmbed) error {
 	if r.config.DiscordWebhookURL == "" {
 		return nil
 	}
-	payload := map[string]interface{}{
-		"content":  content,
-		"username": "Pamawas Alert",
+	payload := discordMessage{
+		Username: "Pamawas Alert",
+		Embeds:   []discordEmbed{embed},
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
