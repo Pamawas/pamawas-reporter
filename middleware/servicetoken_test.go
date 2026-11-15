@@ -83,3 +83,25 @@ func TestServiceTokenAuthFailsClosedWithoutConfiguration(t *testing.T) {
 		t.Fatalf("status = %d reached = %v, want 401 and unreached", rec.Code, reached)
 	}
 }
+
+// TestEveryReporterAPIRouteRequiresTheToken verifies the exemption list cannot
+// accidentally widen to cover a delivery-triggering route.
+func TestEveryReporterAPIRouteRequiresTheToken(t *testing.T) {
+	routes := []string{
+		"/api/v1/reports",
+		"/api/v1/status",
+		"/api/v1/alerts",
+		"/api/v1/alerts/resolved",
+		"/api/v1/retry-stalled-deliveries",
+	}
+	handler := ServiceTokenAuth("secret-token", IsProbeOrMetricsPath)(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) },
+	))
+	for _, route := range routes {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, route, nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s: status = %d, want 401 without a token", route, rec.Code)
+		}
+	}
+}
