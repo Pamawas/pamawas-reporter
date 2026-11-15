@@ -42,19 +42,21 @@ func TestSendToDiscordUsesEmbeds(t *testing.T) {
 		WithArgs("test-id").
 		WillReturnRows(sqlmock.NewRows([]string{"incident_id", "inclusion_reason"}).
 			AddRow(incidentID, models.InclusionReasonHighSeverityImmediate))
-	// getIncidentsByIDs selects exactly these 7 columns.
-	mock.ExpectQuery("SELECT id, title, status, started_at, resolved_at, severity, affected_services").
+	// getIncidentsByIDs selects exactly these 10 columns.
+	mock.ExpectQuery("SELECT id, title, status, started_at, resolved_at, severity, environment").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "title", "status", "started_at", "resolved_at",
-			"severity", "affected_services",
+			"severity", "environment", "affected_services",
+			"correlation_policy", "correlation_version",
 		}).AddRow(incidentID, "Monitoring Target Down", "open", time.Now(),
-			nil, "critical", "{grafana}"))
+			nil, "critical", "production", "{last-labs}",
+			"service_time_window", 1))
 	mock.ExpectQuery("FROM evidence e").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "incident_id", "type", "content", "source",
+			"id", "incident_id", "type", "content", "source", "source_detail",
 			"confidence", "supports_evidence", "contradicts_evidence", "ordinal",
 		}).AddRow("evd_1", incidentID, "fact", "CPU load spiked to 17",
-			"prometheus", 0.95, "{}", "{}", 0))
+			"prometheus", "node_load1", 0.95, "{}", "{}", 0))
 
 	if err := r.sendToDiscord(context.Background(), report); err != nil {
 		t.Fatalf("sendToDiscord failed: %v", err)
@@ -62,14 +64,23 @@ func TestSendToDiscordUsesEmbeds(t *testing.T) {
 
 	embeds, ok := raw["embeds"].([]interface{})
 	require.True(t, ok, "payload must contain embeds")
-	require.Len(t, embeds, 2, "expected a summary card and one incident card")
+	// One incident means one card: the report header and the incident belong
+	// together, so splitting them into two cards was redundant.
+	require.Len(t, embeds, 1, "a single-incident report is one card")
 	_, hasContent := raw["content"]
 	require.False(t, hasContent, "reports must not be sent as plain content")
 
-	incidentEmbed, _ := embeds[1].(map[string]interface{})
+	incidentEmbed, _ := embeds[0].(map[string]interface{})
 	require.Equal(t, float64(0xE74C3C), incidentEmbed["color"], "critical incident card must be red")
 	require.Contains(t, incidentEmbed["title"], "Monitoring Target Down")
 	require.Contains(t, incidentEmbed["description"], "CPU load spiked to 17")
+	// The card is built for triage: evidence, not report-generator metadata.
+	// "Availability: 100.00%" during a critical incident misleads, and the
+	// incident count says nothing about this incident.
+	desc, _ := incidentEmbed["description"].(string)
+	require.Contains(t, desc, "Supporting evidence")
+	require.NotContains(t, desc, "Availability:")
+	require.NotContains(t, desc, "Incidents:")
 }
 
 // TestSendToDiscordRateLimitRetry verifies a Discord 429 with Retry-After is

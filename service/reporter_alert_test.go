@@ -272,3 +272,109 @@ func TestAlertNamesTheTargetNotTheSender(t *testing.T) {
 		t.Errorf("card must not repeat a derived service, got %q", got["Services"])
 	}
 }
+
+// TestFindingsCiteTheirSourceAndSeparateActions verifies the card answers two
+// questions a reader asks about every finding: where did this come from
+// (metrics, logs, inference) and what should I do about it. Recommendations are
+// rendered as actions, not mixed into the evidence as more claims.
+func TestFindingsCiteTheirSourceAndSeparateActions(t *testing.T) {
+	evList := []models.Evidence{
+		{Type: "fact", Content: "node_load1 hit 16.37", Source: "prometheus",
+			SourceDetail: `node_load1{instance="koba-labs"}`, Confidence: 0.95},
+		{Type: "fact", Content: "netbird-agent logged stream disconnects", Source: "loki",
+			SourceDetail: "kubernetes_container_name=netbird-agent", Confidence: 0.95},
+		{Type: "likely_cause", Content: "netbird-agent reconnects caused the load", Source: "llm",
+			Confidence: 0.85},
+		{Type: "recommendation", Content: "Pin netbird-agent to a stable relay", Source: "llm",
+			Confidence: 0.8},
+	}
+
+	out := formatFindingsForEmbed(evList, discordMaxDescription)
+
+	if !strings.Contains(out, "Prometheus: node_load1{instance=\"koba-labs\"}") {
+		t.Errorf("metric finding must cite Prometheus and the query, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Loki: kubernetes_container_name=netbird-agent") {
+		t.Errorf("log finding must cite Loki and the stream, got:\n%s", out)
+	}
+	if !strings.Contains(out, "_[inferred]_") {
+		t.Errorf("synthesized finding must be marked as inference, got:\n%s", out)
+	}
+	if !strings.Contains(out, "**🛠 Suggested Actions**") {
+		t.Errorf("recommendations must have their own section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "1. Pin netbird-agent to a stable relay") {
+		t.Errorf("recommendation text missing, got:\n%s", out)
+	}
+	// The action must not appear as an evidence line as well.
+	if strings.Contains(out, "**RECOMMENDATION**") {
+		t.Errorf("recommendation leaked into the findings list:\n%s", out)
+	}
+}
+
+// TestTriageOrderPutsTheAnswerFirst pins the reading order of a single-incident
+// card. An on-call engineer opens this while something is broken: the likely
+// cause and the actions come before the supporting evidence, and the
+// highest-confidence cause is the one surfaced.
+func TestTriageOrderPutsTheAnswerFirst(t *testing.T) {
+	evList := []models.Evidence{
+		{ID: "e1", Type: "fact", Content: "pod restarted", Source: "loki", Confidence: 0.9},
+		{ID: "e2", Type: "likely_cause", Content: "rolling deployment replaced the pod", Source: "llm", Confidence: 0.95},
+		{ID: "e3", Type: "likely_cause", Content: "weaker theory", Source: "llm", Confidence: 0.55},
+		{ID: "e4", Type: "recommendation", Content: "Verify the new pod is serving", Source: "llm", Confidence: 0.8},
+	}
+
+	cause, actions, evidence := triageFindings(evList)
+
+	if cause == nil || cause.ID != "e2" {
+		t.Fatalf("expected the highest-confidence likely cause (e2), got %+v", cause)
+	}
+	if len(actions) != 1 || actions[0].ID != "e4" {
+		t.Fatalf("expected the recommendation to be split out, got %+v", actions)
+	}
+	// The surfaced cause must not be repeated in the evidence list, and the
+	// weaker cause must still be shown.
+	if len(evidence) != 2 {
+		t.Fatalf("expected 2 supporting items, got %d: %+v", len(evidence), evidence)
+	}
+	for _, ev := range evidence {
+		if ev.ID == "e2" {
+			t.Error("surfaced cause was duplicated in supporting evidence")
+		}
+	}
+}
+
+// TestSingleIncidentCardReadsCauseThenActionsThenEvidence verifies the rendered
+// order, since that order is the whole point of the card.
+func TestSingleIncidentCardReadsCauseThenActionsThenEvidence(t *testing.T) {
+	evList := []models.Evidence{
+		{ID: "e1", Type: "fact", Content: "FACT BODY", Source: "loki", Confidence: 0.9},
+		{ID: "e2", Type: "likely_cause", Content: "CAUSE BODY", Source: "llm", Confidence: 0.95},
+		{ID: "e4", Type: "recommendation", Content: "ACTION BODY", Source: "llm", Confidence: 0.8},
+	}
+
+	embed := buildSingleIncidentEmbedForTest(models.Incident{
+		ID: "inc_1", Title: "Monitoring Target Down", Status: "open", Severity: "critical",
+		StartedAt: time.Now().Add(-time.Hour),
+	}, evList)
+
+	desc := embed.Description
+	causeAt := strings.Index(desc, "Likely cause")
+	actionAt := strings.Index(desc, "Suggested actions")
+	evidenceAt := strings.Index(desc, "Supporting evidence")
+	if causeAt < 0 || actionAt < 0 || evidenceAt < 0 {
+		t.Fatalf("missing a section; got:\n%s", desc)
+	}
+	if !(causeAt < actionAt && actionAt < evidenceAt) {
+		t.Fatalf("sections out of triage order (cause=%d actions=%d evidence=%d):\n%s",
+			causeAt, actionAt, evidenceAt, desc)
+	}
+}
+
+// buildSingleIncidentEmbedForTest adapts the method for tests that do not need
+// a database-backed reporter.
+func buildSingleIncidentEmbedForTest(inc models.Incident, evList []models.Evidence) discordEmbed {
+	r := &Reporter{config: ReporterConfig{HighSeverityThreshold: "high"}}
+	report := models.Report{TemplateVersion: "pamawas-report-v2", GeneratedAt: time.Now()}
+	return r.buildSingleIncidentEmbed(report, inc, evList, models.InclusionReasonHighSeverityImmediate)
+}

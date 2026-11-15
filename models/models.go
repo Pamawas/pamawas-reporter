@@ -97,19 +97,24 @@ type LogEntry struct {
 
 // Evidence represents a piece of investigation evidence
 type Evidence struct {
-	ID          string    `json:"id"`
-	IncidentID  string    `json:"incident_id"`
-	RunID       string    `json:"run_id"`
-	Type        string    `json:"type"`
-	Content     string    `json:"content"`
-	Source      string    `json:"source"`
-	Confidence  float64   `json:"confidence"`
-	Supports    []string  `json:"supports_evidence,omitempty"`
-	Contradicts []string  `json:"contradicts_evidence,omitempty"`
-	Ordinal     int       `json:"ordinal"`
-	CreatedAt   time.Time `json:"created_at"`
-	Version     int       `json:"version,omitempty"` // optimistic concurrency
-	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+	ID         string `json:"id"`
+	IncidentID string `json:"incident_id"`
+	RunID      string `json:"run_id"`
+	Type       string `json:"type"`
+	Content    string `json:"content"`
+	// Source is the closed set the investigator records: prometheus, loki,
+	// incidents, llm (its own synthesis), or system (a harness limit).
+	Source string `json:"source"`
+	// SourceDetail is the specific query, stream, or metric the finding rests
+	// on, e.g. 'up{job="system_node", instance="koba-labs"}'.
+	SourceDetail string    `json:"source_detail,omitempty"`
+	Confidence   float64   `json:"confidence"`
+	Supports     []string  `json:"supports_evidence,omitempty"`
+	Contradicts  []string  `json:"contradicts_evidence,omitempty"`
+	Ordinal      int       `json:"ordinal"`
+	CreatedAt    time.Time `json:"created_at"`
+	Version      int       `json:"version,omitempty"` // optimistic concurrency
+	UpdatedAt    time.Time `json:"updated_at,omitempty"`
 	// Enriched data fields
 	Metrics []Metric   `json:"metrics,omitempty"`
 	Logs    []LogEntry `json:"logs,omitempty"`

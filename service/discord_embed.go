@@ -74,8 +74,13 @@ type discordMessage struct {
 	Embeds   []discordEmbed `json:"embeds"`
 }
 
-// buildDiscordMessage renders a report as a summary embed followed by one
-// bordered card per incident.
+// buildDiscordMessage renders a report as Discord embeds.
+//
+// A report about a single incident is ONE card: the report header (availability,
+// period) and the incident's identity and findings belong together, and
+// splitting them produced two cards for a notification that describes one
+// thing. Multi-incident reports keep a summary card followed by one card per
+// incident, because there the summary is genuinely a table of contents.
 func (r *Reporter) buildDiscordMessage(ctx context.Context, report models.Report) (*discordMessage, error) {
 	incidents, inclusionReasons, err := r.loadReportIncidents(ctx, report.ID)
 	if err != nil {
@@ -89,6 +94,16 @@ func (r *Reporter) buildDiscordMessage(ctx context.Context, report models.Report
 	evidence, err := r.loadEvidenceForIncidents(ctx, incidentIDs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load evidence: %w", err)
+	}
+
+	if len(incidents) == 1 {
+		inc := incidents[0]
+		return &discordMessage{
+			Username: "Pamawas Reporter",
+			Embeds: []discordEmbed{
+				r.buildSingleIncidentEmbed(report, inc, evidence[inc.ID], inclusionReasons[inc.ID]),
+			},
+		}, nil
 	}
 
 	embeds := []discordEmbed{r.buildSummaryEmbed(ctx, report, incidents)}
@@ -106,14 +121,142 @@ func (r *Reporter) buildDiscordMessage(ctx context.Context, report models.Report
 	return &discordMessage{Username: "Pamawas Reporter", Embeds: embeds}, nil
 }
 
+// buildSingleIncidentEmbed renders a one-incident report as a card built for
+// someone who has just been paged.
+//
+// The order is deliberate: what is broken, the likely cause, what to do about
+// it, then the supporting evidence. Report-generator metadata (availability for
+// the period, incident counts) is omitted — during a single incident it says
+// nothing about the incident, and "Availability: 100.00%" on a card about a
+// critical outage actively misleads.
+func (r *Reporter) buildSingleIncidentEmbed(report models.Report, inc models.Incident, evList []models.Evidence, inclusionReason string) discordEmbed {
+	embed := buildIncidentEmbed(inc, nil, inclusionReason, report.Timezone)
+
+	cause, actions, evidence := triageFindings(evList)
+
+	var sb strings.Builder
+	if cause != nil {
+		sb.WriteString("**🎯 Likely cause**\n")
+		fmt.Fprintf(&sb, "%s%s\n", cause.Content, evidenceSourceSuffix(*cause))
+	}
+	if len(actions) > 0 {
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("**🛠 Suggested actions**\n")
+		for i, rec := range actions {
+			fmt.Fprintf(&sb, "%d. %s\n", i+1, rec.Content)
+		}
+	}
+	if len(evidence) > 0 {
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("**📋 Supporting evidence**\n")
+		for _, ev := range evidence {
+			fmt.Fprintf(&sb, "%s **%s** (%.0f%%) %s%s\n",
+				evidenceIcon(ev.Type), strings.ToUpper(ev.Type), ev.Confidence*100,
+				ev.Content, evidenceSourceSuffix(ev))
+		}
+	}
+	if sb.Len() == 0 {
+		sb.WriteString("_🔍 Investigation unavailable_")
+	}
+
+	embed.Description = truncateRunes(sb.String(), discordMaxDescription)
+	embed.Footer = reportFooter(report)
+	embed.Timestamp = report.GeneratedAt.UTC().Format(time.RFC3339)
+	return embed
+}
+
+// triageFindings splits evidence into what an on-call reader needs, in reading
+// order: the most probable cause, the suggested actions, and the rest of the
+// evidence. The single highest-confidence likely_cause leads; a hypothesis is
+// used only when the investigation reached no likely cause, and is labelled as
+// such by its own type line.
+func triageFindings(evList []models.Evidence) (cause *models.Evidence, actions, evidence []models.Evidence) {
+	var likely, hypotheses []models.Evidence
+	for i := range evList {
+		ev := evList[i]
+		switch ev.Type {
+		case evidenceTypeRecommendation:
+			actions = append(actions, ev)
+		case "likely_cause":
+			likely = append(likely, ev)
+		case "hypothesis":
+			hypotheses = append(hypotheses, ev)
+		default:
+			evidence = append(evidence, ev)
+		}
+	}
+
+	switch {
+	case len(likely) > 0:
+		best := mostConfident(likely)
+		cause = &best
+		evidence = append(evidence, remaining(likely, best)...)
+	case len(hypotheses) > 0:
+		best := mostConfident(hypotheses)
+		cause = &best
+		evidence = append(evidence, remaining(hypotheses, best)...)
+	}
+	return cause, actions, evidence
+}
+
+// mostConfident returns the highest-confidence finding, keeping input order for
+// ties so the card is deterministic.
+func mostConfident(list []models.Evidence) models.Evidence {
+	best := list[0]
+	for _, ev := range list[1:] {
+		if ev.Confidence > best.Confidence {
+			best = ev
+		}
+	}
+	return best
+}
+
+// remaining returns every finding except the one already surfaced as the cause.
+func remaining(list []models.Evidence, used models.Evidence) []models.Evidence {
+	out := make([]models.Evidence, 0, len(list)-1)
+	skipped := false
+	for _, ev := range list {
+		if !skipped && ev.ID == used.ID && ev.Content == used.Content {
+			skipped = true
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
 // buildSummaryEmbed renders the report headline, availability, and counts.
 func (r *Reporter) buildSummaryEmbed(ctx context.Context, report models.Report, incidents []models.Incident) discordEmbed {
-	needsAttention, resolvedCount := countIncidentStatuses(incidents)
+	needsAttention, _ := countIncidentStatuses(incidents)
 
 	title := "📅 Daily Infrastructure Report"
 	if report.ReportType != "daily" {
 		title = "🚨 High Severity Immediate Report"
 	}
+
+	// Red when anything needs attention, green when everything recovered.
+	color := discordColorResolved
+	if needsAttention > 0 {
+		color = discordColorCritical
+	}
+
+	return discordEmbed{
+		Title:       truncateRunes(title, discordMaxTitle),
+		Description: truncateRunes(r.reportHeader(ctx, report, incidents), discordMaxDescription),
+		Color:       color,
+		Footer:      reportFooter(report),
+		Timestamp:   report.GeneratedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+// reportHeader renders the lines that describe the report itself: availability,
+// incident counts, and the period covered.
+func (r *Reporter) reportHeader(ctx context.Context, report models.Report, incidents []models.Incident) string {
+	needsAttention, resolvedCount := countIncidentStatuses(incidents)
 
 	// Availability is only claimed when a real metric backs it; otherwise the
 	// report states it is unavailable rather than inventing a percentage.
@@ -126,35 +269,28 @@ func (r *Reporter) buildSummaryEmbed(ctx context.Context, report models.Report, 
 	periodStart := report.PeriodStart.In(loadLocation(report.Timezone)).Format("2006-01-02 15:04 MST")
 	periodEnd := report.PeriodEnd.In(loadLocation(report.Timezone)).Format("2006-01-02 15:04 MST")
 
-	description := strings.Join([]string{
+	return strings.Join([]string{
 		availabilityLine,
 		fmt.Sprintf("**Incidents:** %d total · **%d** need attention · **%d** resolved",
 			len(incidents), needsAttention, resolvedCount),
 		"",
 		fmt.Sprintf("🕒 %s → %s", periodStart, periodEnd),
 	}, "\n")
+}
 
-	// Red when anything needs attention, green when everything recovered.
-	color := discordColorResolved
-	if needsAttention > 0 {
-		color = discordColorCritical
-	}
-
-	return discordEmbed{
-		Title:       truncateRunes(title, discordMaxTitle),
-		Description: truncateRunes(description, discordMaxDescription),
-		Color:       color,
-		Footer: &discordEmbedFooter{
-			Text: truncateRunes(fmt.Sprintf("Template: %s · Generated: %s",
-				report.TemplateVersion,
-				report.GeneratedAt.UTC().Format("2006-01-02 15:04:05 UTC")), discordMaxFooter),
-		},
-		Timestamp: report.GeneratedAt.UTC().Format(time.RFC3339),
+// reportFooter records which template produced the report and when.
+func reportFooter(report models.Report) *discordEmbedFooter {
+	return &discordEmbedFooter{
+		Text: truncateRunes(fmt.Sprintf("Template: %s · Generated: %s",
+			report.TemplateVersion,
+			report.GeneratedAt.UTC().Format("2006-01-02 15:04:05 UTC")), discordMaxFooter),
 	}
 }
 
 // buildIncidentEmbed renders one incident as a bordered card: colored left bar,
 // status in the title, bold metadata fields, and the investigation findings.
+// A nil evList leaves the description empty, so the caller can put its own
+// header there (see buildSingleIncidentEmbed).
 func buildIncidentEmbed(inc models.Incident, evList []models.Evidence, inclusionReason, timezone string) discordEmbed {
 	loc := loadLocation(timezone)
 
@@ -163,35 +299,47 @@ func buildIncidentEmbed(inc models.Incident, evList []models.Evidence, inclusion
 		title = fmt.Sprintf("✅ %s", inc.Title)
 	}
 
-	services := strings.Join(inc.AffectedServices, ", ")
-	if services == "" {
-		services = "unknown"
-	}
-	environment := inc.Environment
-	if environment == "" {
-		environment = "unknown"
-	}
-
+	// Only fields that carry information are shown. A field reading "unknown"
+	// looks like a fact the investigation established; the truth is that the
+	// source never supplied it, and an on-call reader should not have to
+	// distinguish the two while triaging.
 	fields := []discordEmbedField{
 		{Name: "Status", Value: fmt.Sprintf("%s %s%s", statusColor(inc.Status), inc.Status, inclusionReasonLabel(inclusionReason)), Inline: true},
 		{Name: "Severity", Value: fmt.Sprintf("%s %s", severityColor(inc.Severity), inc.Severity), Inline: true},
-		{Name: "Environment", Value: environment, Inline: true},
-		{Name: "Services", Value: services, Inline: false},
-		{Name: "Started", Value: inc.StartedAt.In(loc).Format("2006-01-02 15:04:05 MST"), Inline: true},
 	}
+	if environment := inc.Environment; environment != "" {
+		fields = append(fields, discordEmbedField{Name: "Environment", Value: environment, Inline: true})
+	}
+	fields = append(fields, discordEmbedField{Name: "Affected", Value: affectedLabel(inc), Inline: false})
+
+	fields = append(fields, discordEmbedField{
+		Name:   "Started",
+		Value:  inc.StartedAt.In(loc).Format("2006-01-02 15:04:05 MST"),
+		Inline: true,
+	})
 	if !inc.ResolvedAt.IsZero() {
-		fields = append(fields, discordEmbedField{
-			Name:   "Resolved",
-			Value:  inc.ResolvedAt.In(loc).Format("2006-01-02 15:04:05 MST"),
-			Inline: true,
-		})
+		fields = append(fields,
+			discordEmbedField{
+				Name:   "Resolved",
+				Value:  inc.ResolvedAt.In(loc).Format("2006-01-02 15:04:05 MST"),
+				Inline: true,
+			},
+			discordEmbedField{
+				Name:   "Downtime",
+				Value:  inc.ResolvedAt.Sub(inc.StartedAt).Round(time.Second).String(),
+				Inline: true,
+			},
+		)
 	}
 	fields = append(fields, discordEmbedField{Name: "Incident ID", Value: fmt.Sprintf("`%s`", inc.ID), Inline: false})
 
 	// Findings go in the description: it allows 4096 chars, where a field
 	// value stops at 1024. Findings are the substance of the report, so they
 	// must not be truncated to a single field.
-	description := formatFindingsForEmbed(evList)
+	description := ""
+	if evList != nil {
+		description = formatFindingsForEmbed(evList, discordMaxDescription)
+	}
 
 	for i := range fields {
 		fields[i].Name = truncateRunes(fields[i].Name, discordMaxFieldName)
@@ -209,25 +357,60 @@ func buildIncidentEmbed(inc models.Incident, evList []models.Evidence, inclusion
 	}
 }
 
-// formatFindingsForEmbed renders investigation findings as a compact list.
-func formatFindingsForEmbed(evList []models.Evidence) string {
+// formatFindingsForEmbed renders investigation findings as a compact list that
+// fits within budget characters.
+//
+// Each finding is tagged with the system it came from, so a reader can tell a
+// metric from a log line from the model's own inference without leaving the
+// card. Recommended actions are rendered as their own section: they answer
+// "what should I do", not "what did we find".
+func formatFindingsForEmbed(evList []models.Evidence, budget int) string {
 	if len(evList) == 0 {
 		return "_🔍 Investigation unavailable_"
 	}
 
+	findings, recommendations := splitRecommendations(evList)
+
 	var sb strings.Builder
 	sb.WriteString("**🔍 Investigation Findings**\n")
-	for i, ev := range evList {
-		line := fmt.Sprintf("%s **%s** (%.0f%%) %s\n",
-			evidenceIcon(ev.Type), strings.ToUpper(ev.Type), ev.Confidence*100, ev.Content)
-		// Leave room for the truncation notice and the Discord 4096 limit.
-		if sb.Len()+len(line) > discordMaxDescription-60 {
-			fmt.Fprintf(&sb, "\n_… %d more findings omitted_", len(evList)-i)
+	for i, ev := range findings {
+		line := fmt.Sprintf("%s **%s** (%.0f%%) %s%s\n",
+			evidenceIcon(ev.Type), strings.ToUpper(ev.Type), ev.Confidence*100,
+			ev.Content, evidenceSourceSuffix(ev))
+		// Leave room for the truncation notice and the recommendations section.
+		if sb.Len()+len(line) > budget-200 {
+			fmt.Fprintf(&sb, "\n_… %d more findings omitted_\n", len(findings)-i)
 			break
 		}
 		sb.WriteString(line)
 	}
-	return truncateRunes(sb.String(), discordMaxDescription)
+
+	if len(recommendations) > 0 {
+		sb.WriteString("\n**🛠 Suggested Actions**\n")
+		for i, rec := range recommendations {
+			line := fmt.Sprintf("%d. %s\n", i+1, rec.Content)
+			if sb.Len()+len(line) > budget-20 {
+				fmt.Fprintf(&sb, "_… %d more actions omitted_\n", len(recommendations)-i)
+				break
+			}
+			sb.WriteString(line)
+		}
+	}
+
+	return truncateRunes(sb.String(), budget)
+}
+
+// splitRecommendations partitions evidence into findings and suggested actions,
+// preserving each group's order.
+func splitRecommendations(evList []models.Evidence) (findings, recommendations []models.Evidence) {
+	for _, ev := range evList {
+		if ev.Type == evidenceTypeRecommendation {
+			recommendations = append(recommendations, ev)
+			continue
+		}
+		findings = append(findings, ev)
+	}
+	return findings, recommendations
 }
 
 // incidentColor picks the left-bar color: green once resolved, otherwise the

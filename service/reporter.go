@@ -301,8 +301,8 @@ func (r *Reporter) loadEvidenceForIncidents(ctx context.Context, incidentIDs []s
 		return make(map[string][]models.Evidence), nil
 	}
 
-	const query = `SELECT e.id, e.incident_id, e.type, e.content, e.source, e.confidence,
-       e.supports_evidence, e.contradicts_evidence, e.ordinal
+	const query = `SELECT e.id, e.incident_id, e.type, e.content, e.source, e.source_detail,
+       e.confidence, e.supports_evidence, e.contradicts_evidence, e.ordinal
 FROM evidence e
 JOIN investigation_runs ir ON e.run_id = ir.id
 WHERE e.incident_id = ANY($1)
@@ -328,8 +328,8 @@ ORDER BY e.incident_id, ir.completed_at DESC, e.ordinal`
 		var incidentID string
 
 		if err := rows.Scan(
-			&ev.ID, &incidentID, &ev.Type, &ev.Content, &ev.Source, &ev.Confidence,
-			&supportsJSON, &contradictsJSON, &ev.Ordinal,
+			&ev.ID, &incidentID, &ev.Type, &ev.Content, &ev.Source, &ev.SourceDetail,
+			&ev.Confidence, &supportsJSON, &contradictsJSON, &ev.Ordinal,
 		); err != nil {
 			return nil, err
 		}
@@ -460,7 +460,7 @@ func writeIncidentDetailsList(sb *strings.Builder, incidents []models.Incident, 
 	for _, inc := range incidents {
 		reasonLabel := inclusionReasonLabel(inclusionReasons[inc.ID])
 		fmt.Fprintf(sb, "📋 Incident: %s (%s)%s\n", inc.Title, inc.Status, reasonLabel)
-		fmt.Fprintf(sb, "   ID: %s | Severity: %s | Services: %s\n", inc.ID[:min(8, len(inc.ID))], inc.Severity, strings.Join(inc.AffectedServices, ", "))
+		fmt.Fprintf(sb, "   ID: %s | Severity: %s | Affected: %s\n", inc.ID[:min(8, len(inc.ID))], inc.Severity, affectedLabel(inc))
 		fmt.Fprintf(sb, "   Started: %s\n", inc.StartedAt.Format("2006-01-02 15:04:05"))
 		if !inc.ResolvedAt.IsZero() {
 			fmt.Fprintf(sb, "   Resolved: %s\n", inc.ResolvedAt.Format("2006-01-02 15:04:05"))
@@ -488,8 +488,28 @@ func inclusionReasonLabel(reason string) string {
 	return ""
 }
 
+// affectedLabel renders what an incident affects.
+//
+// affected_services holds whatever the source identified: a service name when
+// it has one, otherwise the monitored target (Grafana's `instance`). The label
+// is "Affected" rather than "Services" because the value is often a host, and
+// calling a host a service was wrong. "unknown" is stated rather than hidden —
+// an alert that names nothing must not look like it named something.
+func affectedLabel(inc models.Incident) string {
+	if len(inc.AffectedServices) == 0 {
+		return "unknown"
+	}
+	return strings.Join(inc.AffectedServices, ", ")
+}
+
+// evidenceTypeRecommendation marks a suggested operator action rather than a
+// claim about the incident. Kept separate so the card can present actions as
+// actions instead of mixing them into the evidence list.
+const evidenceTypeRecommendation = "recommendation"
+
 // writeEvidence writes the investigation findings for an incident, or a notice
-// that no investigation was available.
+// that no investigation was available. Recommended actions are separated from
+// the evidence: they are what to do, not what was found.
 func writeEvidence(sb *strings.Builder, evList []models.Evidence) {
 	if len(evList) == 0 {
 		sb.WriteString("   🔍 Investigation Findings: investigation unavailable\n")
@@ -497,9 +517,61 @@ func writeEvidence(sb *strings.Builder, evList []models.Evidence) {
 	}
 	sb.WriteString("   🔍 Investigation Findings:\n")
 	for _, ev := range evList {
-		fmt.Fprintf(sb, "      %s [%s] (%.0f%%) %s\n",
-			evidenceIcon(ev.Type), strings.ToUpper(ev.Type), ev.Confidence*100, ev.Content)
+		if ev.Type == evidenceTypeRecommendation {
+			continue
+		}
+		fmt.Fprintf(sb, "      %s [%s] (%.0f%%) %s%s\n",
+			evidenceIcon(ev.Type), strings.ToUpper(ev.Type), ev.Confidence*100,
+			ev.Content, evidenceSourceSuffix(ev))
 	}
+	writeRecommendations(sb, evList)
+}
+
+// writeRecommendations writes the investigation's suggested actions, if any.
+func writeRecommendations(sb *strings.Builder, evList []models.Evidence) {
+	var recs []models.Evidence
+	for _, ev := range evList {
+		if ev.Type == evidenceTypeRecommendation {
+			recs = append(recs, ev)
+		}
+	}
+	if len(recs) == 0 {
+		return
+	}
+	sb.WriteString("   🛠 Suggested Actions:\n")
+	for i, ev := range recs {
+		fmt.Fprintf(sb, "      %d. %s\n", i+1, ev.Content)
+	}
+}
+
+// evidenceSourceSuffix renders where a finding came from, so a reader can tell
+// a metric from a log from the model's own inference.
+func evidenceSourceSuffix(ev models.Evidence) string {
+	label := evidenceSourceLabel(ev.Source)
+	if label == "" {
+		return ""
+	}
+	if ev.SourceDetail != "" {
+		return fmt.Sprintf(" _[%s: %s]_", label, ev.SourceDetail)
+	}
+	return fmt.Sprintf(" _[%s]_", label)
+}
+
+// evidenceSourceLabel maps a finding's source onto a display label.
+func evidenceSourceLabel(source string) string {
+	switch source {
+	case "prometheus":
+		return "Prometheus"
+	case "loki":
+		return "Loki"
+	case "incidents":
+		return "incident history"
+	case "llm":
+		return "inferred"
+	case "system":
+		return "investigator"
+	}
+	return source
 }
 
 // evidenceIcon returns the emoji icon for a given evidence type.
@@ -513,6 +585,8 @@ func evidenceIcon(evType string) string {
 		return "💭"
 	case "unknown":
 		return "❓"
+	case evidenceTypeRecommendation:
+		return "🛠"
 	}
 	return "📝"
 }
@@ -622,11 +696,6 @@ func writeIncidentCardV2(sb *strings.Builder, inc models.Incident, evList []mode
 		resolvedStr = resolvedLocal.Format("2006-01-02 15:04:05")
 	}
 
-	services := strings.Join(inc.AffectedServices, ", ")
-	if services == "" {
-		services = "unknown"
-	}
-
 	envLine := inc.Environment
 	if envLine == "" {
 		envLine = "unknown"
@@ -641,7 +710,7 @@ func writeIncidentCardV2(sb *strings.Builder, inc models.Incident, evList []mode
 
 	fmt.Fprintf(sb, "%s **%s** (%s)%s\n", statusBadge, inc.Title, inc.Status, reasonLabel)
 	fmt.Fprintf(sb, "🔴 Severity: %s %s\n", sevBadge, inc.Severity)
-	fmt.Fprintf(sb, "🛠 Services: %s\n", services)
+	fmt.Fprintf(sb, "🛠 Affected: %s\n", affectedLabel(inc))
 	fmt.Fprintf(sb, "🌍 Environment: %s\n", envLine)
 	fmt.Fprintf(sb, "🔗 Correlation: %s\n", corrLine)
 	fmt.Fprintf(sb, "📅 Started: %s\n", startedStr)
@@ -684,7 +753,8 @@ func (r *Reporter) getIncidentsByIDs(ctx context.Context, incidentIDs []string) 
 		return []models.Incident{}, nil
 	}
 
-	const query = `SELECT id, title, status, started_at, resolved_at, severity, affected_services
+	const query = `SELECT id, title, status, started_at, resolved_at, severity, environment,
+       affected_services, correlation_policy, correlation_version
 FROM incidents
 WHERE id = ANY($1)
 ORDER BY started_at DESC`
@@ -707,7 +777,8 @@ ORDER BY started_at DESC`
 
 		if err := rows.Scan(
 			&inc.ID, &inc.Title, &inc.Status, &inc.StartedAt, &resolvedAt,
-			&inc.Severity, &rawServices,
+			&inc.Severity, &inc.Environment, &rawServices,
+			&inc.CorrelationPolicy, &inc.CorrelationVersion,
 		); err != nil {
 			return nil, err
 		}
