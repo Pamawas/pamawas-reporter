@@ -224,9 +224,9 @@ func (h *Handler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, map[string]interface{}{
-		"uptime":             time.Since(h.reporter.StartTime()).String(),
-		"version":            "1.0.0",
-		"circuit_breakers":   cbStates,
+		"uptime":           time.Since(h.reporter.StartTime()).String(),
+		"version":          "1.0.0",
+		"circuit_breakers": cbStates,
 	})
 }
 
@@ -265,38 +265,38 @@ func (h *Handler) RetryStalledDeliveriesHandler(w http.ResponseWriter, r *http.R
 	})
 }
 
-// ResolveNotificationHandler sends an "alert solved" notification for a resolved
+// AlertResolvedHandler sends an "alert resolved" message for a resolved
 // incident. Only high/critical severity incidents produce a user-facing
-// notification; lower severities are skipped silently.
-func (h *Handler) ResolveNotificationHandler(w http.ResponseWriter, r *http.Request) {
+// message; lower severities are skipped silently.
+func (h *Handler) AlertResolvedHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodPost {
 		log.Error().Str("method", r.Method).Str("path", r.URL.Path).
-			Msg("ResolveNotificationHandler: method not allowed")
+			Msg("AlertResolvedHandler: method not allowed")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var payload models.ResolveNotificationPayload
+	var payload models.AlertPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		log.Error().Err(err).Str("path", r.URL.Path).
-			Msg("ResolveNotificationHandler: invalid request body")
+			Msg("AlertResolvedHandler: invalid request body")
 		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}
 
 	if payload.IncidentID == "" {
-		log.Error().Str("path", r.URL.Path).Msg("ResolveNotificationHandler: missing incident_id")
+		log.Error().Str("path", r.URL.Path).Msg("AlertResolvedHandler: missing incident_id")
 		http.Error(w, "incident_id is required", http.StatusBadRequest)
 		return
 	}
 
-	resp, err := h.reporter.SendResolveNotification(r.Context(), payload)
+	resp, err := h.reporter.SendResolveAlert(r.Context(), payload)
 	if err != nil {
 		log.Error().Err(err).
 			Str("request_id", payload.RequestID).
 			Str("incident_id", payload.IncidentID).
-			Msg("ResolveNotificationHandler: resolve notification failed")
+			Msg("AlertResolvedHandler: resolved alert delivery failed")
 		http.Error(w, fmt.Sprintf("Resolve notification failed: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -306,7 +306,57 @@ func (h *Handler) ResolveNotificationHandler(w http.ResponseWriter, r *http.Requ
 		Str("incident_id", payload.IncidentID).
 		Bool("sent", resp.Sent).
 		Bool("skipped", resp.Skipped).
-		Msg("ResolveNotificationHandler: resolve notification processed")
+		Msg("AlertResolvedHandler: resolved alert processed")
+
+	w.WriteHeader(http.StatusOK)
+	writeJSON(w, resp)
+}
+
+// AlertHandler sends the immediate high-severity alert for a firing incident.
+// Ingest forwards the first firing event for an incident here, event-driven,
+// so the user is notified as soon as the incident exists rather than on the
+// scheduler's next poll. One-shot per incident: repeats are skipped as
+// already_notified, and severities below the threshold are skipped silently.
+func (h *Handler) AlertHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		log.Error().Str("method", r.Method).Str("path", r.URL.Path).
+			Msg("AlertHandler: method not allowed")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var payload models.AlertPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		log.Error().Err(err).Str("path", r.URL.Path).
+			Msg("AlertHandler: invalid request body")
+		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if payload.IncidentID == "" {
+		log.Error().Str("path", r.URL.Path).Msg("AlertHandler: missing incident_id")
+		http.Error(w, "incident_id is required", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := h.reporter.SendAlert(r.Context(), payload)
+	if err != nil {
+		log.Error().Err(err).
+			Str("request_id", payload.RequestID).
+			Str("incident_id", payload.IncidentID).
+			Msg("AlertHandler: alert delivery failed")
+		http.Error(w, fmt.Sprintf("Alert delivery failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	log.Info().
+		Str("request_id", payload.RequestID).
+		Str("incident_id", payload.IncidentID).
+		Bool("sent", resp.Sent).
+		Bool("skipped", resp.Skipped).
+		Str("reason", resp.Reason).
+		Msg("AlertHandler: alert processed")
 
 	w.WriteHeader(http.StatusOK)
 	writeJSON(w, resp)

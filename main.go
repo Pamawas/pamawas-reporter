@@ -104,7 +104,8 @@ func main() {
 	// V1 API endpoints
 	r.HandleFunc("/api/v1/reports", h.ReportHandler)
 	r.HandleFunc("/api/v1/status", h.StatusHandler)
-	r.HandleFunc("/api/v1/resolve-notification", h.ResolveNotificationHandler)
+	r.HandleFunc("/api/v1/alerts/resolved", h.AlertResolvedHandler)
+	r.HandleFunc("/api/v1/alerts", h.AlertHandler)
 	r.HandleFunc("/api/v1/retry-stalled-deliveries", h.RetryStalledDeliveriesHandler)
 	registerMetricsRoutes(r, h.MetricsHandler())
 
@@ -112,7 +113,8 @@ func main() {
 	var handler http.Handler = r
 	handler = middleware.RateLimitMiddleware("pamawas-reporter", map[string]middleware.RouteLimit{
 		"/api/v1/reports":                  {RPS: cfg.RateLimitRPS, Burst: cfg.RateLimitBurst},
-		"/api/v1/resolve-notification":     {RPS: cfg.RateLimitRPS, Burst: cfg.RateLimitBurst},
+		"/api/v1/alerts/resolved":          {RPS: cfg.RateLimitRPS, Burst: cfg.RateLimitBurst},
+		"/api/v1/alerts":                   {RPS: cfg.RateLimitRPS, Burst: cfg.RateLimitBurst},
 		"/api/v1/retry-stalled-deliveries": {RPS: cfg.RateLimitRPS, Burst: cfg.RateLimitBurst},
 		"/api/v1/status":                   {RPS: cfg.RateLimitRPS, Burst: cfg.RateLimitBurst},
 	}, handler)

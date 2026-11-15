@@ -277,17 +277,17 @@ type ReportFeedback struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// ResolveNotificationPayload represents a request to send an "alert solved"
-// notification for a resolved incident. Only high/critical severity incidents
-// produce a user-facing notification.
-type ResolveNotificationPayload struct {
-	IncidentID   string `json:"incident_id"`
-	RequestID    string `json:"request_id"`
-	ContractVersion int   `json:"contract_version"`
+// AlertPayload represents a request to send an immediate high-severity alert
+// for a firing incident. Sent event-driven from ingest (like the resolve
+// notification); severity gating and the one-shot claim live on the reporter.
+type AlertPayload struct {
+	IncidentID      string `json:"incident_id"`
+	RequestID       string `json:"request_id"`
+	ContractVersion int    `json:"contract_version"`
 }
 
-// ResolveNotificationResponse represents the response from the resolve-notification endpoint.
-type ResolveNotificationResponse struct {
+// AlertResponse represents the response from the alerts endpoint.
+type AlertResponse struct {
 	IncidentID string `json:"incident_id"`
 	Sent       bool   `json:"sent"`
 	Skipped    bool   `json:"skipped"`

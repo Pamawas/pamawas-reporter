@@ -66,15 +66,15 @@ type ReporterConfig struct {
 
 // Reporter holds the database connection and reporting logic
 type Reporter struct {
-	db             *sql.DB
-	config         ReporterConfig
-	metrics        *metrics.Metrics
-	httpClient     *http.Client
-	ctx            context.Context
-	cancelFunc     context.CancelFunc
-	startTime      time.Time
+	db              *sql.DB
+	config          ReporterConfig
+	metrics         *metrics.Metrics
+	httpClient      *http.Client
+	ctx             context.Context
+	cancelFunc      context.CancelFunc
+	startTime       time.Time
 	circuitBreakers map[string]*CircuitBreaker
-	cbMu           sync.Mutex
+	cbMu            sync.Mutex
 }
 
 // NewReporter creates a new reporter instance
@@ -88,13 +88,13 @@ func NewReporter(db *sql.DB, cfg ReporterConfig, m *metrics.Metrics) *Reporter {
 		cbMap[channel] = NewCircuitBreaker(cfg.CircuitBreakerFailureThreshold, cfg.CircuitBreakerResetTimeout)
 	}
 	return &Reporter{
-		db:             db,
-		config:         cfg,
-		metrics:        m,
-		httpClient:     &http.Client{Timeout: 10 * time.Second},
-		ctx:            ctx,
-		cancelFunc:     cancel,
-		startTime:      time.Now(),
+		db:              db,
+		config:          cfg,
+		metrics:         m,
+		httpClient:      &http.Client{Timeout: 10 * time.Second},
+		ctx:             ctx,
+		cancelFunc:      cancel,
+		startTime:       time.Now(),
 		circuitBreakers: cbMap,
 	}
 }
@@ -1487,10 +1487,10 @@ func (r *Reporter) sendToEmail(ctx context.Context, report models.Report) error 
 	return nil
 }
 
-// SendResolveNotification sends an "alert solved" notification for a resolved
+// SendResolveAlert sends an "alert resolved" message for a resolved
 // incident via Discord/Telegram/Email. Only high/critical severity incidents
 // produce a user-facing notification; lower severities are skipped silently.
-func (r *Reporter) SendResolveNotification(ctx context.Context, payload models.ResolveNotificationPayload) (*models.ResolveNotificationResponse, error) {
+func (r *Reporter) SendResolveAlert(ctx context.Context, payload models.AlertPayload) (*models.AlertResponse, error) {
 	var (
 		title       string
 		severity    string
@@ -1501,7 +1501,7 @@ func (r *Reporter) SendResolveNotification(ctx context.Context, payload models.R
 	row := r.db.QueryRowContext(ctx, `SELECT title, severity, environment, resolved_at, started_at FROM incidents WHERE id = $1`, payload.IncidentID)
 	if err := row.Scan(&title, &severity, &environment, &resolvedAt, &startedAt); err != nil {
 		if err == sql.ErrNoRows {
-			return &models.ResolveNotificationResponse{
+			return &models.AlertResponse{
 				IncidentID: payload.IncidentID,
 				Sent:       false,
 				Skipped:    true,
@@ -1516,7 +1516,7 @@ func (r *Reporter) SendResolveNotification(ctx context.Context, payload models.R
 	// threshold (default "high" => high/critical only), so we don't buzz for
 	// low-level alerts.
 	if severityRank(severity) < severityRank(r.config.HighSeverityThreshold) {
-		return &models.ResolveNotificationResponse{
+		return &models.AlertResponse{
 			IncidentID: payload.IncidentID,
 			Sent:       false,
 			Skipped:    true,
@@ -1525,45 +1525,12 @@ func (r *Reporter) SendResolveNotification(ctx context.Context, payload models.R
 		}, nil
 	}
 
-	msg := formatResolveNotification(payload.IncidentID, title, severity, environment, resolvedAt.Time, startedAt)
+	msg := formatResolvedAlertMessage(payload.IncidentID, title, severity, environment, resolvedAt.Time, startedAt)
 
-	var sent bool
-	var firstErr error
-
-	// Send via all configured channels (best effort; failures are logged).
-	if r.config.DiscordWebhookURL != "" {
-		if err := r.sendResolveToDiscord(ctx, msg); err != nil {
-			log.Error().Err(err).Str("incident_id", payload.IncidentID).Msg("Discord resolve notification failed")
-			if firstErr == nil {
-				firstErr = err
-			}
-		} else {
-			sent = true
-		}
-	}
-	if r.config.TelegramBotToken != "" && r.config.TelegramChatID != "" {
-		if err := r.sendResolveToTelegram(ctx, msg); err != nil {
-			log.Error().Err(err).Str("incident_id", payload.IncidentID).Msg("Telegram resolve notification failed")
-			if firstErr == nil {
-				firstErr = err
-			}
-		} else {
-			sent = true
-		}
-	}
-	if r.config.EmailSMTPHost != "" && r.config.EmailUsername != "" && r.config.EmailPassword != "" {
-		if err := r.sendResolveToEmail(ctx, msg, title); err != nil {
-			log.Error().Err(err).Str("incident_id", payload.IncidentID).Msg("Email resolve notification failed")
-			if firstErr == nil {
-				firstErr = err
-			}
-		} else {
-			sent = true
-		}
-	}
+	sent, firstErr := r.deliverAlert(ctx, payload.IncidentID, msg, "Alert resolved: "+title)
 
 	if !sent && firstErr != nil {
-		return &models.ResolveNotificationResponse{
+		return &models.AlertResponse{
 			IncidentID: payload.IncidentID,
 			Sent:       false,
 			Skipped:    false,
@@ -1572,7 +1539,7 @@ func (r *Reporter) SendResolveNotification(ctx context.Context, payload models.R
 		}, nil
 	}
 
-	return &models.ResolveNotificationResponse{
+	return &models.AlertResponse{
 		IncidentID: payload.IncidentID,
 		Sent:       sent,
 		Skipped:    false,
@@ -1580,8 +1547,153 @@ func (r *Reporter) SendResolveNotification(ctx context.Context, payload models.R
 	}, nil
 }
 
-// formatResolveNotification builds a human-readable alert-solved message.
-func formatResolveNotification(incidentID, title, severity, environment string, resolvedAt, startedAt time.Time) string {
+// SendAlert sends the immediate high-severity alert for a firing incident.
+//
+// This is the event-driven counterpart of SendResolveAlert: ingest
+// forwards the first firing event for an incident as soon as it is persisted,
+// instead of the scheduler discovering it on its next 30-second poll. The
+// follow-up report (with investigation evidence) remains scheduler-owned.
+//
+// Alerting is one-shot per incident, enforced by an atomic claim on
+// incidents.alert_notified_at. Grafana re-fires a sustained alert every
+// evaluation interval, and every re-fire correlates into the same open
+// incident — without the claim the user would be buzzed continuously. A
+// resolved-then-refired alert correlates into a NEW incident row (resolved
+// incidents are not correlation candidates), so it alerts again naturally.
+func (r *Reporter) SendAlert(ctx context.Context, payload models.AlertPayload) (*models.AlertResponse, error) {
+	var (
+		title       string
+		severity    string
+		environment string
+		startedAt   time.Time
+	)
+	row := r.db.QueryRowContext(ctx, `SELECT title, severity, environment, started_at FROM incidents WHERE id = $1`, payload.IncidentID)
+	if err := row.Scan(&title, &severity, &environment, &startedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return &models.AlertResponse{
+				IncidentID: payload.IncidentID,
+				Sent:       false,
+				Skipped:    true,
+				Reason:     "incident_not_found",
+				Message:    "incident not found",
+			}, nil
+		}
+		return nil, err
+	}
+
+	// Alerts fire only at or above the configured threshold (default "high"
+	// => high/critical). Checked before claiming so a low-severity incident
+	// does not consume its one-shot claim.
+	if severityRank(severity) < severityRank(r.config.HighSeverityThreshold) {
+		return &models.AlertResponse{
+			IncidentID: payload.IncidentID,
+			Sent:       false,
+			Skipped:    true,
+			Reason:     "severity_below_threshold",
+			Message:    fmt.Sprintf("alert skipped: severity %s is below threshold %s", severity, r.config.HighSeverityThreshold),
+		}, nil
+	}
+
+	// One-shot claim. UPDATE ... WHERE alert_notified_at IS NULL is atomic, so
+	// concurrent forwards of the same incident (Grafana retries, duplicate
+	// webhooks racing) cannot double-alert.
+	var claimedID string
+	err := r.db.QueryRowContext(ctx, `
+		UPDATE incidents
+		SET alert_notified_at = now(), updated_at = now()
+		WHERE id = $1 AND alert_notified_at IS NULL
+		RETURNING id
+	`, payload.IncidentID).Scan(&claimedID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return &models.AlertResponse{
+				IncidentID: payload.IncidentID,
+				Sent:       false,
+				Skipped:    true,
+				Reason:     "already_notified",
+				Message:    "immediate alert already sent for this incident",
+			}, nil
+		}
+		return nil, err
+	}
+
+	msg := formatAlertMessage(payload.IncidentID, title, severity, environment, startedAt)
+	sent, firstErr := r.deliverAlert(ctx, payload.IncidentID, msg, "High-severity alert: "+title)
+
+	if !sent && firstErr != nil {
+		// Release the claim so a later re-fire can retry: an alert nobody
+		// received must not be recorded as delivered.
+		if _, relErr := r.db.ExecContext(ctx, `UPDATE incidents SET alert_notified_at = NULL WHERE id = $1`, payload.IncidentID); relErr != nil {
+			log.Error().Err(relErr).Str("incident_id", payload.IncidentID).Msg("Failed to release alert claim after delivery failure")
+		}
+		return &models.AlertResponse{
+			IncidentID: payload.IncidentID,
+			Sent:       false,
+			Skipped:    false,
+			Reason:     "delivery_failed",
+			Message:    firstErr.Error(),
+		}, nil
+	}
+
+	return &models.AlertResponse{
+		IncidentID: payload.IncidentID,
+		Sent:       sent,
+		Skipped:    false,
+		Message:    "alert sent",
+	}, nil
+}
+
+// channelSender is one configured delivery channel.
+type channelSender struct {
+	channel string
+	send    func(ctx context.Context, content, subject string) error
+}
+
+// configuredChannelSenders returns the enabled channels. Channel
+// destinations are trusted configuration, never request fields.
+func (r *Reporter) configuredChannelSenders() []channelSender {
+	var senders []channelSender
+	if r.config.DiscordWebhookURL != "" {
+		senders = append(senders, channelSender{"discord", func(ctx context.Context, content, _ string) error {
+			return r.sendDiscordMessage(ctx, content)
+		}})
+	}
+	if r.config.TelegramBotToken != "" && r.config.TelegramChatID != "" {
+		senders = append(senders, channelSender{"telegram", func(ctx context.Context, content, _ string) error {
+			return r.sendTelegramMessage(ctx, content)
+		}})
+	}
+	if r.config.EmailSMTPHost != "" && r.config.EmailUsername != "" && r.config.EmailPassword != "" {
+		senders = append(senders, channelSender{"email", func(ctx context.Context, content, subject string) error {
+			return r.sendEmailMessage(ctx, content, subject)
+		}})
+	}
+	return senders
+}
+
+// deliverAlert delivers one message to every configured channel,
+// best effort: a failing channel never suppresses the others.
+func (r *Reporter) deliverAlert(ctx context.Context, incidentID, content, subject string) (bool, error) {
+	var sent bool
+	var firstErr error
+	for _, sender := range r.configuredChannelSenders() {
+		if err := sender.send(ctx, content, subject); err != nil {
+			log.Error().Err(err).
+				Str("channel", sender.channel).
+				Str("incident_id", incidentID).
+				Msg("Alert delivery failed")
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		sent = true
+	}
+	return sent, firstErr
+}
+
+// formatResolvedAlertMessage builds a human-readable alert-resolved message.
+func formatResolvedAlertMessage(incidentID, title, severity, environment string, resolvedAt, startedAt time.Time) string {
 	var sb strings.Builder
 	sb.WriteString("✅ *Alert Resolved*\n")
 	fmt.Fprintf(&sb, "Incident: %s (%s)\n", title, incidentID)
@@ -1597,8 +1709,24 @@ func formatResolveNotification(incidentID, title, severity, environment string, 
 	return sb.String()
 }
 
-// sendResolveToDiscord sends an alert-resolved message via Discord webhook.
-func (r *Reporter) sendResolveToDiscord(ctx context.Context, content string) error {
+// formatAlertNotification builds the immediate high-severity alert message for
+// a firing incident. It is intentionally light: the scheduler-owned follow-up
+// report carries the investigation evidence.
+func formatAlertMessage(incidentID, title, severity, environment string, startedAt time.Time) string {
+	var sb strings.Builder
+	sb.WriteString("🚨 *High Severity Alert*\n")
+	fmt.Fprintf(&sb, "Incident: %s (%s)\n", title, incidentID)
+	fmt.Fprintf(&sb, "Severity: %s\n", severity)
+	fmt.Fprintf(&sb, "Environment: %s\n", environment)
+	if !startedAt.IsZero() {
+		fmt.Fprintf(&sb, "Started: %s\n", startedAt.UTC().Format(time.RFC3339))
+	}
+	sb.WriteString("Investigation will follow up with findings once complete.")
+	return sb.String()
+}
+
+// sendDiscordMessage sends a notification message via Discord webhook.
+func (r *Reporter) sendDiscordMessage(ctx context.Context, content string) error {
 	if r.config.DiscordWebhookURL == "" {
 		return nil
 	}
@@ -1630,8 +1758,8 @@ func (r *Reporter) sendResolveToDiscord(ctx context.Context, content string) err
 	return nil
 }
 
-// sendResolveToTelegram sends an alert-resolved message via Telegram Bot API.
-func (r *Reporter) sendResolveToTelegram(ctx context.Context, content string) error {
+// sendTelegramMessage sends a notification message via Telegram Bot API.
+func (r *Reporter) sendTelegramMessage(ctx context.Context, content string) error {
 	if r.config.TelegramBotToken == "" || r.config.TelegramChatID == "" {
 		return nil
 	}
@@ -1668,8 +1796,8 @@ func (r *Reporter) sendResolveToTelegram(ctx context.Context, content string) er
 	return nil
 }
 
-// sendResolveToEmail sends an alert-resolved message via SMTP.
-func (r *Reporter) sendResolveToEmail(ctx context.Context, body, subject string) error {
+// sendEmailMessage sends a notification message via SMTP.
+func (r *Reporter) sendEmailMessage(ctx context.Context, body, subject string) error {
 	if r.config.EmailSMTPHost == "" || r.config.EmailUsername == "" || r.config.EmailPassword == "" {
 		return nil
 	}
@@ -1697,7 +1825,7 @@ func (r *Reporter) sendResolveToEmail(ctx context.Context, body, subject string)
 	if err := client.DialAndSendWithContext(emailCtx, msg); err != nil {
 		return fmt.Errorf("failed to send email: %w", err)
 	}
-	log.Info().Str("smtp_host", r.config.EmailSMTPHost).Str("to", r.config.EmailTo).Msg("Resolve notification email sent successfully")
+	log.Info().Str("smtp_host", r.config.EmailSMTPHost).Str("to", r.config.EmailTo).Msg("Notification email sent successfully")
 	return nil
 }
 
