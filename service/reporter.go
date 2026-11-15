@@ -1374,88 +1374,55 @@ func (r *Reporter) sendToEmail(ctx context.Context, report models.Report) error 
 	return nil
 }
 
-// SendResolveAlert sends an "alert resolved" message for a resolved
-// incident via Discord/Telegram/Email. Only high/critical severity incidents
+// SendResolveAlert sends an "alert resolved" message for a resolved event via
+// Discord/Telegram/Email. Only severities at or above the configured threshold
 // produce a user-facing notification; lower severities are skipped silently.
+//
+// Like SendAlert this is event-sourced: ingest forwards the resolved webhook
+// directly, so there is no incident row to read from. The resolve time is the
+// moment the event arrived.
 func (r *Reporter) SendResolveAlert(ctx context.Context, payload models.AlertPayload) (*models.AlertResponse, error) {
-	var (
-		title       string
-		severity    string
-		environment string
-		startedAt   time.Time
-		resolvedAt  time.Time
-	)
-
-	if payload.IncidentID != "" {
-		var resolved sql.NullTime
-		row := r.db.QueryRowContext(ctx, `SELECT title, severity, environment, resolved_at, started_at FROM incidents WHERE id = $1`, payload.IncidentID)
-		if err := row.Scan(&title, &severity, &environment, &resolved, &startedAt); err != nil {
-			if err == sql.ErrNoRows {
-				return &models.AlertResponse{
-					IncidentID: payload.IncidentID,
-					Sent:       false,
-					Skipped:    true,
-					Reason:     "incident_not_found",
-					Message:    "incident not found",
-				}, nil
-			}
-			return nil, err
-		}
-		resolvedAt = resolved.Time
-	} else {
-		// Event-sourced resolve: ingest forwards the resolved webhook directly.
-		title, severity, environment = payload.Title, payload.Severity, payload.Environment
-		if payload.StartedAt != "" {
-			parsed, parseErr := time.Parse(time.RFC3339, payload.StartedAt)
-			if parseErr != nil {
-				log.Warn().Err(parseErr).Str("started_at", payload.StartedAt).Msg("Invalid started_at in alert payload; omitting start time")
-			} else {
-				startedAt = parsed
-			}
-		}
-		resolvedAt = time.Now().UTC()
-	}
+	title, severity, environment := payload.Title, payload.Severity, payload.Environment
+	startedAt := parseAlertTime(payload.StartedAt)
+	resolvedAt := time.Now().UTC()
 
 	// Resolve messages only for severity at or above the configured threshold
 	// (default "high" => high/critical only), so we don't buzz for low-level
 	// alerts. Same gate as the firing alert.
 	if severityRank(severity) < severityRank(r.config.HighSeverityThreshold) {
 		return &models.AlertResponse{
-			IncidentID: payload.IncidentID,
-			Sent:       false,
-			Skipped:    true,
-			Reason:     "severity_below_threshold",
-			Message:    fmt.Sprintf("resolve notification skipped: severity %s is below threshold %s", severity, r.config.HighSeverityThreshold),
+			Sent:    false,
+			Skipped: true,
+			Reason:  "severity_below_threshold",
+			Message: fmt.Sprintf("resolve notification skipped: severity %s is below threshold %s", severity, r.config.HighSeverityThreshold),
 		}, nil
 	}
 
-	sent, firstErr := r.deliverAlert(ctx, payload.IncidentID, alertContent{
-		Text:    formatResolvedAlertMessage(payload.IncidentID, title, severity, environment, resolvedAt, startedAt),
+	sent, firstErr := r.deliverAlert(ctx, payload.DedupKey, alertContent{
+		Text:    formatResolvedAlertMessage(title, severity, environment, resolvedAt, startedAt),
 		Subject: "Alert resolved: " + title,
-		Embed:   buildResolvedAlertEmbed(payload.IncidentID, title, severity, environment, resolvedAt, startedAt),
+		Embed:   buildResolvedAlertEmbed(title, severity, environment, payload.Services, resolvedAt, startedAt),
 	})
 
 	// The alert resolved, so release the one-shot claim: if this condition
 	// fires again later it must alert again.
-	if relErr := r.releaseAlertClaim(ctx, r.alertDedupKey(payload)); relErr != nil {
-		log.Error().Err(relErr).Msg("Failed to release alert claim on resolve")
+	if relErr := r.releaseAlertClaim(ctx, payload.DedupKey); relErr != nil {
+		log.Error().Err(relErr).Str("dedup_key", payload.DedupKey).Msg("Failed to release alert claim on resolve")
 	}
 
 	if !sent && firstErr != nil {
 		return &models.AlertResponse{
-			IncidentID: payload.IncidentID,
-			Sent:       false,
-			Skipped:    false,
-			Reason:     "delivery_failed",
-			Message:    firstErr.Error(),
+			Sent:    false,
+			Skipped: false,
+			Reason:  "delivery_failed",
+			Message: firstErr.Error(),
 		}, nil
 	}
 
 	return &models.AlertResponse{
-		IncidentID: payload.IncidentID,
-		Sent:       sent,
-		Skipped:    false,
-		Message:    "resolve notification sent",
+		Sent:    sent,
+		Skipped: false,
+		Message: "resolve notification sent",
 	}, nil
 }
 
@@ -1472,119 +1439,72 @@ func (r *Reporter) SendResolveAlert(ctx context.Context, payload models.AlertPay
 // from being buzzed continuously. When the alert resolves, SendResolveAlert
 // releases the claim so a later re-fire alerts again.
 func (r *Reporter) SendAlert(ctx context.Context, payload models.AlertPayload) (*models.AlertResponse, error) {
-	title, severity, environment, startedAt, err := r.alertDetails(ctx, payload, false)
-	if err != nil {
-		return nil, err
-	}
-	if title == "" {
-		return &models.AlertResponse{
-			IncidentID: payload.IncidentID,
-			Sent:       false,
-			Skipped:    true,
-			Reason:     "incident_not_found",
-			Message:    "incident not found",
-		}, nil
-	}
+	title, severity, environment := payload.Title, payload.Severity, payload.Environment
+	startedAt := parseAlertTime(payload.StartedAt)
 
 	// Severity gate before claiming, so a below-threshold event never consumes
 	// the one-shot claim.
 	if severityRank(severity) < severityRank(r.config.HighSeverityThreshold) {
 		return &models.AlertResponse{
-			IncidentID: payload.IncidentID,
-			Sent:       false,
-			Skipped:    true,
-			Reason:     "severity_below_threshold",
-			Message:    fmt.Sprintf("alert skipped: severity %s is below threshold %s", severity, r.config.HighSeverityThreshold),
+			Sent:    false,
+			Skipped: true,
+			Reason:  "severity_below_threshold",
+			Message: fmt.Sprintf("alert skipped: severity %s is below threshold %s", severity, r.config.HighSeverityThreshold),
 		}, nil
 	}
 
-	dedupKey := r.alertDedupKey(payload)
-	claimed, err := r.claimAlert(ctx, dedupKey)
+	claimed, err := r.claimAlert(ctx, payload.DedupKey)
 	if err != nil {
 		return nil, err
 	}
 	if !claimed {
 		return &models.AlertResponse{
-			IncidentID: payload.IncidentID,
-			Sent:       false,
-			Skipped:    true,
-			Reason:     "already_notified",
-			Message:    "immediate alert already sent for this condition",
+			Sent:    false,
+			Skipped: true,
+			Reason:  "already_notified",
+			Message: "immediate alert already sent for this condition",
 		}, nil
 	}
 
-	sent, firstErr := r.deliverAlert(ctx, payload.IncidentID, alertContent{
-		Text:    formatAlertMessage(payload.IncidentID, title, severity, environment, startedAt),
+	sent, firstErr := r.deliverAlert(ctx, payload.DedupKey, alertContent{
+		Text:    formatAlertMessage(title, severity, environment, startedAt),
 		Subject: "High-severity alert: " + title,
-		Embed:   buildAlertEmbed(payload.IncidentID, title, severity, environment, startedAt),
+		Embed:   buildAlertEmbed(title, severity, environment, payload.Services, startedAt),
 	})
 
 	if !sent && firstErr != nil {
 		// Release the claim so a later re-fire can retry: an alert nobody
 		// received must not be recorded as delivered.
-		if relErr := r.releaseAlertClaim(ctx, dedupKey); relErr != nil {
-			log.Error().Err(relErr).Str("dedup_key", dedupKey).Msg("Failed to release alert claim after delivery failure")
+		if relErr := r.releaseAlertClaim(ctx, payload.DedupKey); relErr != nil {
+			log.Error().Err(relErr).Str("dedup_key", payload.DedupKey).Msg("Failed to release alert claim after delivery failure")
 		}
 		return &models.AlertResponse{
-			IncidentID: payload.IncidentID,
-			Sent:       false,
-			Skipped:    false,
-			Reason:     "delivery_failed",
-			Message:    firstErr.Error(),
+			Sent:    false,
+			Skipped: false,
+			Reason:  "delivery_failed",
+			Message: firstErr.Error(),
 		}, nil
 	}
 
 	return &models.AlertResponse{
-		IncidentID: payload.IncidentID,
-		Sent:       sent,
-		Skipped:    false,
-		Message:    "alert sent",
+		Sent:    sent,
+		Skipped: false,
+		Message: "alert sent",
 	}, nil
 }
 
-// alertDetails resolves the alert's display fields. An incident id wins when
-// present (it carries the canonical values); otherwise the event-sourced fields
-// on the payload are used, which is the normal immediate-alert path.
-func (r *Reporter) alertDetails(ctx context.Context, payload models.AlertPayload, wantResolved bool) (title, severity, environment string, startedAt time.Time, err error) {
-	if payload.IncidentID == "" {
-		if payload.StartedAt != "" {
-			parsed, parseErr := time.Parse(time.RFC3339, payload.StartedAt)
-			if parseErr != nil {
-				log.Warn().Err(parseErr).Str("started_at", payload.StartedAt).Msg("Invalid started_at in alert payload; omitting start time")
-			} else {
-				startedAt = parsed
-			}
-		}
-		return payload.Title, payload.Severity, payload.Environment, startedAt, nil
+// parseAlertTime parses an RFC3339 timestamp from an alert payload. An invalid
+// value yields the zero time, which the renderers omit.
+func parseAlertTime(value string) time.Time {
+	if value == "" {
+		return time.Time{}
 	}
-
-	if wantResolved {
-		var resolvedAt sql.NullTime
-		err = r.db.QueryRowContext(ctx, `SELECT title, severity, environment, resolved_at, started_at FROM incidents WHERE id = $1`, payload.IncidentID).
-			Scan(&title, &severity, &environment, &resolvedAt, &startedAt)
-		if err == sql.ErrNoRows {
-			return "", "", "", time.Time{}, nil
-		}
-		return title, severity, environment, startedAt, err
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		log.Warn().Err(err).Str("started_at", value).Msg("Invalid started_at in alert payload; omitting start time")
+		return time.Time{}
 	}
-
-	err = r.db.QueryRowContext(ctx, `SELECT title, severity, environment, started_at FROM incidents WHERE id = $1`, payload.IncidentID).
-		Scan(&title, &severity, &environment, &startedAt)
-	if err == sql.ErrNoRows {
-		return "", "", "", time.Time{}, nil
-	}
-	return title, severity, environment, startedAt, err
-}
-
-// alertDedupKey identifies the alerting condition for one-shot claiming.
-func (r *Reporter) alertDedupKey(payload models.AlertPayload) string {
-	if payload.DedupKey != "" {
-		return payload.DedupKey
-	}
-	if payload.IncidentID != "" {
-		return "incident:" + payload.IncidentID
-	}
-	return "request:" + payload.RequestID
+	return parsed
 }
 
 // claimAlert atomically records that this alert condition has been notified.
@@ -1661,14 +1581,14 @@ func (r *Reporter) configuredChannelSenders() []channelSender {
 
 // deliverAlert delivers one message to every configured channel,
 // best effort: a failing channel never suppresses the others.
-func (r *Reporter) deliverAlert(ctx context.Context, incidentID string, content alertContent) (bool, error) {
+func (r *Reporter) deliverAlert(ctx context.Context, dedupKey string, content alertContent) (bool, error) {
 	var sent bool
 	var firstErr error
 	for _, sender := range r.configuredChannelSenders() {
 		if err := sender.send(ctx, content); err != nil {
 			log.Error().Err(err).
 				Str("channel", sender.channel).
-				Str("incident_id", incidentID).
+				Str("dedup_key", dedupKey).
 				Msg("Alert delivery failed")
 			if firstErr == nil {
 				firstErr = err
@@ -1681,10 +1601,10 @@ func (r *Reporter) deliverAlert(ctx context.Context, incidentID string, content 
 }
 
 // formatResolvedAlertMessage builds a human-readable alert-resolved message.
-func formatResolvedAlertMessage(incidentID, title, severity, environment string, resolvedAt, startedAt time.Time) string {
+func formatResolvedAlertMessage(title, severity, environment string, resolvedAt, startedAt time.Time) string {
 	var sb strings.Builder
 	sb.WriteString("✅ *Alert Resolved*\n")
-	fmt.Fprintf(&sb, "Incident: %s (%s)\n", title, incidentID)
+	fmt.Fprintf(&sb, "Alert: %s\n", title)
 	fmt.Fprintf(&sb, "Severity: %s\n", severity)
 	fmt.Fprintf(&sb, "Environment: %s\n", environment)
 	if !startedAt.IsZero() {
@@ -1698,12 +1618,12 @@ func formatResolvedAlertMessage(incidentID, title, severity, environment string,
 }
 
 // formatAlertNotification builds the immediate high-severity alert message for
-// a firing incident. It is intentionally light: the scheduler-owned follow-up
+// a firing event. It is intentionally light: the scheduler-owned follow-up
 // report carries the investigation evidence.
-func formatAlertMessage(incidentID, title, severity, environment string, startedAt time.Time) string {
+func formatAlertMessage(title, severity, environment string, startedAt time.Time) string {
 	var sb strings.Builder
 	sb.WriteString("🚨 *High Severity Alert*\n")
-	fmt.Fprintf(&sb, "Incident: %s (%s)\n", title, incidentID)
+	fmt.Fprintf(&sb, "Alert: %s\n", title)
 	fmt.Fprintf(&sb, "Severity: %s\n", severity)
 	fmt.Fprintf(&sb, "Environment: %s\n", environment)
 	if !startedAt.IsZero() {

@@ -265,8 +265,8 @@ func (h *Handler) RetryStalledDeliveriesHandler(w http.ResponseWriter, r *http.R
 	})
 }
 
-// AlertResolvedHandler sends an "alert resolved" message for a resolved
-// incident. Only high/critical severity incidents produce a user-facing
+// AlertResolvedHandler sends an "alert resolved" message for a resolved event.
+// Only severities at or above the configured threshold produce a user-facing
 // message; lower severities are skipped silently.
 func (h *Handler) AlertResolvedHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -285,9 +285,9 @@ func (h *Handler) AlertResolvedHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if payload.IncidentID == "" {
-		log.Error().Str("path", r.URL.Path).Msg("AlertResolvedHandler: missing incident_id")
-		http.Error(w, "incident_id is required", http.StatusBadRequest)
+	if err := validateAlertPayload(&payload); err != nil {
+		log.Error().Err(err).Str("path", r.URL.Path).Msg("AlertResolvedHandler: invalid payload")
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -295,7 +295,7 @@ func (h *Handler) AlertResolvedHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Error().Err(err).
 			Str("request_id", payload.RequestID).
-			Str("incident_id", payload.IncidentID).
+			Str("dedup_key", payload.DedupKey).
 			Msg("AlertResolvedHandler: resolved alert delivery failed")
 		http.Error(w, fmt.Sprintf("Resolve notification failed: %v", err), http.StatusInternalServerError)
 		return
@@ -303,7 +303,7 @@ func (h *Handler) AlertResolvedHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Info().
 		Str("request_id", payload.RequestID).
-		Str("incident_id", payload.IncidentID).
+		Str("dedup_key", payload.DedupKey).
 		Bool("sent", resp.Sent).
 		Bool("skipped", resp.Skipped).
 		Msg("AlertResolvedHandler: resolved alert processed")
@@ -312,10 +312,10 @@ func (h *Handler) AlertResolvedHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-// AlertHandler sends the immediate high-severity alert for a firing incident.
-// Ingest forwards the first firing event for an incident here, event-driven,
-// so the user is notified as soon as the incident exists rather than on the
-// scheduler's next poll. One-shot per incident: repeats are skipped as
+// AlertHandler sends the immediate high-severity alert for a firing event.
+// Ingest forwards the event here the moment it is persisted — event-driven, so
+// the user is notified immediately rather than on the correlator's next cycle
+// or the scheduler's next poll. One-shot per condition: repeats are skipped as
 // already_notified, and severities below the threshold are skipped silently.
 func (h *Handler) AlertHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -334,9 +334,9 @@ func (h *Handler) AlertHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if payload.IncidentID == "" {
-		log.Error().Str("path", r.URL.Path).Msg("AlertHandler: missing incident_id")
-		http.Error(w, "incident_id is required", http.StatusBadRequest)
+	if err := validateAlertPayload(&payload); err != nil {
+		log.Error().Err(err).Str("path", r.URL.Path).Msg("AlertHandler: invalid payload")
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -344,7 +344,7 @@ func (h *Handler) AlertHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Error().Err(err).
 			Str("request_id", payload.RequestID).
-			Str("incident_id", payload.IncidentID).
+			Str("dedup_key", payload.DedupKey).
 			Msg("AlertHandler: alert delivery failed")
 		http.Error(w, fmt.Sprintf("Alert delivery failed: %v", err), http.StatusInternalServerError)
 		return
@@ -352,7 +352,7 @@ func (h *Handler) AlertHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Info().
 		Str("request_id", payload.RequestID).
-		Str("incident_id", payload.IncidentID).
+		Str("dedup_key", payload.DedupKey).
 		Bool("sent", resp.Sent).
 		Bool("skipped", resp.Skipped).
 		Str("reason", resp.Reason).
@@ -360,4 +360,20 @@ func (h *Handler) AlertHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	writeJSON(w, resp)
+}
+
+// validateAlertPayload enforces the event-sourced alert contract. There is no
+// incident at alert time, so an incident id is neither required nor accepted;
+// the condition is identified by DedupKey instead.
+func validateAlertPayload(payload *models.AlertPayload) error {
+	if payload.Title == "" {
+		return fmt.Errorf("title is required")
+	}
+	if payload.Severity == "" {
+		return fmt.Errorf("severity is required")
+	}
+	if payload.DedupKey == "" {
+		return fmt.Errorf("dedup_key is required")
+	}
+	return nil
 }

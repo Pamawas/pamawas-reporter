@@ -321,10 +321,13 @@ func truncateRunes(s string, limit int) string {
 // This is the firing notification: it carries the incident basics and says the
 // investigation will follow up. The follow-up report arrives later as its own
 // cards with the findings.
-func buildAlertEmbed(incidentID, title, severity, environment string, startedAt time.Time) discordEmbed {
+func buildAlertEmbed(title, severity, environment, services string, startedAt time.Time) discordEmbed {
 	fields := []discordEmbedField{
 		{Name: "Severity", Value: fmt.Sprintf("%s %s", severityColor(severity), severity), Inline: true},
 		{Name: "Environment", Value: orUnknown(environment), Inline: true},
+	}
+	if services != "" {
+		fields = append(fields, discordEmbedField{Name: "Services", Value: services, Inline: true})
 	}
 	if !startedAt.IsZero() {
 		fields = append(fields, discordEmbedField{
@@ -333,11 +336,6 @@ func buildAlertEmbed(incidentID, title, severity, environment string, startedAt 
 			Inline: true,
 		})
 	}
-	fields = append(fields, discordEmbedField{
-		Name:   "Incident ID",
-		Value:  fmt.Sprintf("`%s`", incidentID),
-		Inline: false,
-	})
 
 	for i := range fields {
 		fields[i].Name = truncateRunes(fields[i].Name, discordMaxFieldName)
@@ -354,10 +352,13 @@ func buildAlertEmbed(incidentID, title, severity, environment string, startedAt 
 }
 
 // buildResolvedAlertEmbed renders the alert-resolved message as a card.
-func buildResolvedAlertEmbed(incidentID, title, severity, environment string, resolvedAt, startedAt time.Time) discordEmbed {
+func buildResolvedAlertEmbed(title, severity, environment, services string, resolvedAt, startedAt time.Time) discordEmbed {
 	fields := []discordEmbedField{
 		{Name: "Severity", Value: fmt.Sprintf("%s %s", severityColor(severity), severity), Inline: true},
 		{Name: "Environment", Value: orUnknown(environment), Inline: true},
+	}
+	if services != "" {
+		fields = append(fields, discordEmbedField{Name: "Services", Value: services, Inline: true})
 	}
 	if !startedAt.IsZero() {
 		fields = append(fields, discordEmbedField{
@@ -378,11 +379,6 @@ func buildResolvedAlertEmbed(incidentID, title, severity, environment string, re
 			Inline: true,
 		})
 	}
-	fields = append(fields, discordEmbedField{
-		Name:   "Incident ID",
-		Value:  fmt.Sprintf("`%s`", incidentID),
-		Inline: false,
-	})
 
 	for i := range fields {
 		fields[i].Name = truncateRunes(fields[i].Name, discordMaxFieldName)
