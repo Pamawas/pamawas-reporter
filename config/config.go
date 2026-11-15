@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -32,6 +33,10 @@ type Config struct {
 	AvailabilityMetric string
 	// Report rendering template: "v1" (legacy plain text) or "v2" (Uptime Kuma-style card layout).
 	ReportTemplate string
+	// Delivery-channel circuit breaker (centralized; was hard-coded 3 / 30s in
+	// service.NewReporter).
+	CircuitBreakerFailureThreshold int
+	CircuitBreakerResetTimeout     time.Duration
 }
 
 func Load() Config {
@@ -101,6 +106,12 @@ func Load() Config {
 	if err := v.BindEnv("report_template", "REPORT_TEMPLATE", "PAMAWAS_REPORTER_REPORT_TEMPLATE"); err != nil {
 		panic(fmt.Sprintf("failed to bind REPORT_TEMPLATE env: %v", err))
 	}
+	if err := v.BindEnv("circuit_breaker_failure_threshold", "CIRCUIT_BREAKER_FAILURE_THRESHOLD"); err != nil {
+		panic(fmt.Sprintf("failed to bind CIRCUIT_BREAKER_FAILURE_THRESHOLD env: %v", err))
+	}
+	if err := v.BindEnv("circuit_breaker_reset_timeout", "CIRCUIT_BREAKER_RESET_TIMEOUT"); err != nil {
+		panic(fmt.Sprintf("failed to bind CIRCUIT_BREAKER_RESET_TIMEOUT env: %v", err))
+	}
 
 	// Defaults
 	v.SetDefault("port", "8080")
@@ -110,6 +121,8 @@ func Load() Config {
 	v.SetDefault("high_severity_threshold", "high")
 	v.SetDefault("high_severity_investigation_timeout", "5m")
 	v.SetDefault("report_template", "v1")
+	v.SetDefault("circuit_breaker_failure_threshold", 3)
+	v.SetDefault("circuit_breaker_reset_timeout", "30s")
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
@@ -137,20 +150,41 @@ func Load() Config {
 		PrometheusURL:                    v.GetString("prometheus_url"),
 		AvailabilityMetric:               v.GetString("availability_metric"),
 		ReportTemplate:                   v.GetString("report_template"),
+		CircuitBreakerFailureThreshold:   v.GetInt("circuit_breaker_failure_threshold"),
+		CircuitBreakerResetTimeout:       v.GetDuration("circuit_breaker_reset_timeout"),
 	}
 
-	if cfg.DatabaseURL == "" {
-		panic("DATABASE_URL not set (config file or PAMAWAS_REPORTER_DATABASE_URL / DATABASE_URL env var)")
+	if err := cfg.Validate(); err != nil {
+		panic(fmt.Sprintf("invalid configuration: %v", err))
 	}
 	return cfg
 }
 
 func (c Config) Validate() error {
 	if c.DatabaseURL == "" {
-		return fmt.Errorf("database_url is required")
+		return fmt.Errorf("database_url is required (config file or PAMAWAS_REPORTER_DATABASE_URL / DATABASE_URL env var)")
 	}
 	if c.Port == "" {
 		return fmt.Errorf("port is required")
+	}
+	if c.CircuitBreakerFailureThreshold < 1 {
+		return fmt.Errorf("circuit_breaker_failure_threshold must be >= 1, got %d", c.CircuitBreakerFailureThreshold)
+	}
+	if c.CircuitBreakerResetTimeout <= 0 {
+		return fmt.Errorf("circuit_breaker_reset_timeout must be > 0, got %s", c.CircuitBreakerResetTimeout)
+	}
+	switch strings.ToLower(c.HighSeverityThreshold) {
+	case "debug", "info", "warning", "high", "critical":
+	default:
+		return fmt.Errorf("high_severity_threshold must be one of debug|info|warning|high|critical, got %q", c.HighSeverityThreshold)
+	}
+	switch c.ReportTemplate {
+	case "v1", "v2":
+	default:
+		return fmt.Errorf("report_template must be v1 or v2, got %q", c.ReportTemplate)
+	}
+	if c.EmailSMTPPort < 1 || c.EmailSMTPPort > 65535 {
+		return fmt.Errorf("email_smtp_port must be 1..65535, got %d", c.EmailSMTPPort)
 	}
 	return nil
 }

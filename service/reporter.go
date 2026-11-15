@@ -57,6 +57,11 @@ type ReporterConfig struct {
 	AvailabilityMetric string
 	// Report rendering template: "v1" (legacy plain text) or "v2" (Uptime Kuma-style card layout).
 	ReportTemplate string
+	// Circuit breaker for delivery channels: consecutive failures before the
+	// breaker opens, and how long it stays open before a trial call.
+	// Centralized here per the design review (was hard-coded 3 / 30s).
+	CircuitBreakerFailureThreshold int
+	CircuitBreakerResetTimeout     time.Duration
 }
 
 // Reporter holds the database connection and reporting logic
@@ -76,10 +81,11 @@ type Reporter struct {
 func NewReporter(db *sql.DB, cfg ReporterConfig, m *metrics.Metrics) *Reporter {
 	ctx, cancel := context.WithCancel(context.Background())
 	cbMap := make(map[string]*CircuitBreaker)
-	// Circuit breaker per delivery channel: trip after 3 consecutive failures,
-	// stay open for 30 seconds before allowing a single trial call.
+	// Circuit breaker per delivery channel, driven by centralized config:
+	// trip after CircuitBreakerFailureThreshold consecutive failures, stay
+	// open for CircuitBreakerResetTimeout before allowing a trial call.
 	for _, channel := range []string{"discord", "telegram", "email", "prometheus"} {
-		cbMap[channel] = NewCircuitBreaker(3, 30*time.Second)
+		cbMap[channel] = NewCircuitBreaker(cfg.CircuitBreakerFailureThreshold, cfg.CircuitBreakerResetTimeout)
 	}
 	return &Reporter{
 		db:             db,

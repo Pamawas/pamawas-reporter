@@ -35,6 +35,14 @@ func newMockReporter(t *testing.T, cfg ReporterConfig) (*Reporter, sqlmock.Sqlmo
 			t.Logf("Failed to close database: %v", closeErr)
 		}
 	})
+	// Tests construct ReporterConfig{} literals; give the circuit breakers a
+	// valid budget so they behave like production defaults in assertions.
+	if cfg.CircuitBreakerFailureThreshold == 0 {
+		cfg.CircuitBreakerFailureThreshold = 3
+	}
+	if cfg.CircuitBreakerResetTimeout == 0 {
+		cfg.CircuitBreakerResetTimeout = 30 * time.Second
+	}
 	return NewReporter(db, cfg, testMetrics()), mock
 }
 

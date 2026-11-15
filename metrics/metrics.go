@@ -16,54 +16,71 @@ type Metrics struct {
 	StalledDeliveriesTotal prometheus.Counter
 }
 
-// NewMetrics creates and registers all metrics
+// NewMetrics creates and registers all metrics.
+//
+// Names follow the pamawas_<subsystem>_<metric> convention (design review
+// P3): namespace `pamawas`, subsystem `reporter`.
 func NewMetrics() *Metrics {
 	return &Metrics{
 		ReportsGeneratedTotal: promauto.NewCounter(
 			prometheus.CounterOpts{
-				Name: "reporter_reports_generated_total",
-				Help: "Total number of reports generated",
+				Namespace: "pamawas",
+				Subsystem: "reporter",
+				Name:      "reports_generated_total",
+				Help:      "Total number of reports generated",
 			},
 		),
 		DeliveryTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "reporter_delivery_total",
-				Help: "Total number of report deliveries",
+				Namespace: "pamawas",
+				Subsystem: "reporter",
+				Name:      "delivery_total",
+				Help:      "Total number of report deliveries",
 			},
 			[]string{"channel", "status"},
 		),
 		DBConnectionErrors: promauto.NewCounter(
 			prometheus.CounterOpts{
-				Name: "reporter_db_connection_errors_total",
-				Help: "Total number of database connection errors",
+				Namespace: "pamawas",
+				Subsystem: "reporter",
+				Name:      "db_connection_errors_total",
+				Help:      "Total number of database connection errors",
 			},
 		),
 		FetchDuration: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Name:    "pamawas_fetch_duration_seconds",
-				Help:    "Duration of Prometheus/Loki fetch operations in seconds",
-				Buckets: prometheus.DefBuckets,
+				Namespace: "pamawas",
+				Subsystem: "reporter",
+				Name:      "fetch_duration_seconds",
+				Help:      "Duration of Prometheus/Loki fetch operations in seconds",
+				Buckets:   prometheus.DefBuckets,
 			},
 			[]string{"type"},
 		),
 		CircuitBreakerState: promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "reporter_circuit_breaker_state",
-				Help: "Circuit breaker state per channel (0=closed, 1=open, 2=half-open)",
+				Namespace: "pamawas",
+				Subsystem: "reporter",
+				Name:      "circuit_breaker_state",
+				Help:      "Circuit breaker state per channel (0=closed, 1=open, 2=half-open)",
 			},
 			[]string{"channel"},
 		),
 		CircuitBreakerFailures: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Name: "reporter_circuit_breaker_failures_total",
-				Help: "Total number of circuit breaker failures per channel",
+				Namespace: "pamawas",
+				Subsystem: "reporter",
+				Name:      "circuit_breaker_failures_total",
+				Help:      "Total number of circuit breaker failures per channel",
 			},
 			[]string{"channel"},
 		),
 		StalledDeliveriesTotal: promauto.NewCounter(
 			prometheus.CounterOpts{
-				Name: "reporter_stalled_deliveries_total",
-				Help: "Total number of stalled delivery attempts recovered",
+				Namespace: "pamawas",
+				Subsystem: "reporter",
+				Name:      "stalled_deliveries_total",
+				Help:      "Total number of stalled delivery attempts recovered",
 			},
 		),
 	}
