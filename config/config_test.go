@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func inTempDir(t *testing.T) {
@@ -46,7 +47,7 @@ func TestLoadPanicsWithoutDatabaseURL(t *testing.T) {
 			return
 		}
 		msg, ok := got.(string)
-		if !ok || !strings.Contains(msg, "DATABASE_URL not set") {
+		if !ok || !strings.Contains(msg, "database_url is required") {
 			t.Fatalf("unexpected panic: %v", got)
 		}
 	}()
@@ -54,7 +55,15 @@ func TestLoadPanicsWithoutDatabaseURL(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
-	valid := Config{DatabaseURL: "db", Port: "8080"}
+	valid := Config{
+		DatabaseURL:                    "db",
+		Port:                           "8080",
+		HighSeverityThreshold:          "high",
+		ReportTemplate:                 "v1",
+		EmailSMTPPort:                  587,
+		CircuitBreakerFailureThreshold: 3,
+		CircuitBreakerResetTimeout:     30 * time.Second,
+	}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
@@ -63,8 +72,13 @@ func TestValidate(t *testing.T) {
 		cfg  Config
 		want string
 	}{
-		{"database", Config{Port: "8080"}, "database_url"},
-		{"port", Config{DatabaseURL: "db"}, "port"},
+		{"database", func() Config { c := valid; c.DatabaseURL = ""; return c }(), "database_url"},
+		{"port", func() Config { c := valid; c.Port = ""; return c }(), "port"},
+		{"cb_threshold", func() Config { c := valid; c.CircuitBreakerFailureThreshold = 0; return c }(), "circuit_breaker_failure_threshold"},
+		{"cb_reset", func() Config { c := valid; c.CircuitBreakerResetTimeout = 0; return c }(), "circuit_breaker_reset_timeout"},
+		{"threshold", func() Config { c := valid; c.HighSeverityThreshold = "urgent"; return c }(), "high_severity_threshold"},
+		{"template", func() Config { c := valid; c.ReportTemplate = "v3"; return c }(), "report_template"},
+		{"smtp_port", func() Config { c := valid; c.EmailSMTPPort = 0; return c }(), "email_smtp_port"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
