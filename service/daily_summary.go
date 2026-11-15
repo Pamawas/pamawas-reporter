@@ -69,6 +69,9 @@ func (r *Reporter) summarizeDay(ctx context.Context, report models.Report, incid
 		return ""
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if r.config.ServiceToken != "" {
+		req.Header.Set("X-Service-Token", r.config.ServiceToken)
+	}
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {

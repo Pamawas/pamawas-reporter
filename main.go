@@ -120,6 +120,11 @@ func main() {
 	}, handler)
 	handler = middleware.LoggingMiddleware("pamawas-reporter", handler)
 	handler = middleware.ErrorLoggingMiddleware("pamawas-reporter", handler)
+	// Service-to-service auth. Applied after the loggers so a rejected request
+	// is still logged, and it covers every /api/v1 route — those trigger
+	// Discord/Telegram/email delivery and report generation, so an
+	// unauthenticated caller inside the cluster could page people.
+	handler = middleware.ServiceTokenAuth(cfg.ServiceToken, middleware.IsProbeOrMetricsPath)(handler)
 
 	// Create server
 	// Write timeout covers report generation and delivery initiation. The

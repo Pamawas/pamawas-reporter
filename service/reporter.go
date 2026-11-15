@@ -59,6 +59,9 @@ type ReporterConfig struct {
 	AvailabilityMetric string
 	// Report rendering template: "v1" (legacy plain text) or "v2" (Uptime Kuma-style card layout).
 	ReportTemplate string
+	// ServiceToken authenticates calls to sibling services (the investigator)
+	// and matches the token those services require inbound.
+	ServiceToken string
 	// InvestigatorURL is where the daily digest's prose summary comes from.
 	// LLM access lives in the investigator; the reporter only calls it.
 	InvestigatorURL string

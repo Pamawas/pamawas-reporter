@@ -27,6 +27,7 @@ func TestLoadDefaultsAndEnvironmentOverrides(t *testing.T) {
 	inTempDir(t)
 	t.Setenv("PAMAWAS_REPORTER_DATABASE_URL", "postgres://example/test")
 	t.Setenv("PAMAWAS_REPORTER_PORT", "9090")
+	t.Setenv("PAMAWAS_SERVICE_TOKEN", "test-service-token")
 
 	cfg := Load()
 	if cfg.DatabaseURL != "postgres://example/test" || cfg.Port != "9090" {
@@ -58,6 +59,7 @@ func TestValidate(t *testing.T) {
 	valid := Config{
 		DatabaseURL:                    "db",
 		Port:                           "8080",
+		ServiceToken:                   "token",
 		HighSeverityThreshold:          "high",
 		ReportTemplate:                 "v1",
 		EmailSMTPPort:                  587,
@@ -76,6 +78,7 @@ func TestValidate(t *testing.T) {
 	}{
 		{"database", func() Config { c := valid; c.DatabaseURL = ""; return c }(), "database_url"},
 		{"port", func() Config { c := valid; c.Port = ""; return c }(), "port"},
+		{"service_token", func() Config { c := valid; c.ServiceToken = ""; return c }(), "service_token"},
 		{"cb_threshold", func() Config { c := valid; c.CircuitBreakerFailureThreshold = 0; return c }(), "circuit_breaker_failure_threshold"},
 		{"cb_reset", func() Config { c := valid; c.CircuitBreakerResetTimeout = 0; return c }(), "circuit_breaker_reset_timeout"},
 		{"threshold", func() Config { c := valid; c.HighSeverityThreshold = "urgent"; return c }(), "high_severity_threshold"},

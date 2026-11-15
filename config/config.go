@@ -23,6 +23,10 @@ type Config struct {
 	EmailPassword      string
 	EmailFrom          string
 	EmailTo            string
+	// ServiceToken authenticates every internal caller (ingest, scheduler).
+	// The reporter's /api/v1 endpoints trigger user-facing delivery, so they
+	// must not be reachable without it.
+	ServiceToken string
 	// Minimum severity (inclusive) that triggers resolve notifications ("high" sends for high/critical only).
 	HighSeverityThreshold string
 	// How long to wait for investigation to complete before generating high-severity report. Zero disables the wait.
@@ -123,6 +127,9 @@ func Load() Config {
 	if err := v.BindEnv("circuit_breaker_reset_timeout", "CIRCUIT_BREAKER_RESET_TIMEOUT"); err != nil {
 		panic(fmt.Sprintf("failed to bind CIRCUIT_BREAKER_RESET_TIMEOUT env: %v", err))
 	}
+	if err := v.BindEnv("service_token", "PAMAWAS_SERVICE_TOKEN"); err != nil {
+		panic(fmt.Sprintf("failed to bind PAMAWAS_SERVICE_TOKEN env: %v", err))
+	}
 	if err := v.BindEnv("investigator_url", "INVESTIGATOR_URL", "PAMAWAS_REPORTER_INVESTIGATOR_URL"); err != nil {
 		panic(fmt.Sprintf("failed to bind INVESTIGATOR_URL env: %v", err))
 	}
@@ -176,6 +183,7 @@ func Load() Config {
 		PrometheusURL:                    v.GetString("prometheus_url"),
 		AvailabilityMetric:               v.GetString("availability_metric"),
 		ReportTemplate:                   v.GetString("report_template"),
+		ServiceToken:                     v.GetString("service_token"),
 		InvestigatorURL:                  v.GetString("investigator_url"),
 		SummaryTimeout:                   v.GetDuration("summary_timeout"),
 		CircuitBreakerFailureThreshold:   v.GetInt("circuit_breaker_failure_threshold"),
@@ -196,6 +204,9 @@ func (c Config) Validate() error {
 	}
 	if c.Port == "" {
 		return fmt.Errorf("port is required")
+	}
+	if c.ServiceToken == "" {
+		return fmt.Errorf("service_token is required (set PAMAWAS_SERVICE_TOKEN): the reporter's API triggers user-facing delivery and must not be reachable unauthenticated")
 	}
 	if c.CircuitBreakerFailureThreshold < 1 {
 		return fmt.Errorf("circuit_breaker_failure_threshold must be >= 1, got %d", c.CircuitBreakerFailureThreshold)

@@ -51,6 +51,7 @@ func NewHandler(db *sql.DB, cfg config.Config, m *metrics.Metrics) *Handler {
 		PrometheusURL:                    cfg.PrometheusURL,
 		AvailabilityMetric:               cfg.AvailabilityMetric,
 		ReportTemplate:                   cfg.ReportTemplate,
+		ServiceToken:                     cfg.ServiceToken,
 		InvestigatorURL:                  cfg.InvestigatorURL,
 		SummaryTimeout:                   cfg.SummaryTimeout,
 		CircuitBreakerFailureThreshold:   cfg.CircuitBreakerFailureThreshold,
