@@ -37,7 +37,11 @@ func ServiceTokenAuth(token string, exempt func(string) bool) func(http.Handler)
 					Msg("Rejected request with invalid service token")
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","message":"Invalid or missing service token"}}`))
+				// The status line is already written; a failure here means the
+				// connection dropped, which errcheck must still see handled.
+				if _, err := w.Write([]byte(`{"error":{"code":"unauthorized","message":"Invalid or missing service token"}}`)); err != nil {
+					log.Debug().Err(err).Msg("Failed to write unauthorized response body")
+				}
 				return
 			}
 
