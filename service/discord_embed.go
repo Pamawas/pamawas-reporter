@@ -684,7 +684,12 @@ func buildResolvedAlertEmbed(subject alertSubject, resolvedAt time.Time, inciden
 		// particular recovery looks like.
 		description += "\n\n" + recurrence
 	}
-	description += "\n\n🔍 Investigation findings follow in a separate report."
+	// Promise findings only when an incident is linked. Without one we cannot
+	// tell "correlation has not run yet" from "none will ever exist", so the
+	// card says nothing rather than asserting either.
+	if incidentID != "" {
+		description += "\n\n🔍 Investigation findings follow in a separate report."
+	}
 	fields = trimAlertFields(fields)
 
 	embed := discordEmbed{
