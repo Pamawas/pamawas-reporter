@@ -273,7 +273,7 @@ func (r *Reporter) loadReportIncidents(ctx context.Context, reportID string) ([]
 	reasons := make(map[string]string)
 	for rows.Next() {
 		var id, reason string
-		if err := rows.Scan(&id, &reason); err != nil {
+		if err = rows.Scan(&id, &reason); err != nil {
 			return nil, nil, err
 		}
 		ids = append(ids, id)
