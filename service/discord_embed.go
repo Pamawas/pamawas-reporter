@@ -115,7 +115,7 @@ func (r *Reporter) buildDiscordMessage(ctx context.Context, report models.Report
 				Msg("Discord embed limit reached; remaining incidents omitted from the card view")
 			break
 		}
-		embeds = append(embeds, buildIncidentEmbed(inc, evidence[inc.ID], inclusionReasons[inc.ID], report.Timezone))
+		embeds = append(embeds, buildIncidentEmbed(report, inc, evidence[inc.ID], inclusionReasons[inc.ID]))
 	}
 
 	return &discordMessage{Username: "Pamawas Reporter", Embeds: embeds}, nil
@@ -130,7 +130,7 @@ func (r *Reporter) buildDiscordMessage(ctx context.Context, report models.Report
 // nothing about the incident, and "Availability: 100.00%" on a card about a
 // critical outage actively misleads.
 func (r *Reporter) buildSingleIncidentEmbed(report models.Report, inc models.Incident, evList []models.Evidence, inclusionReason string) discordEmbed {
-	embed := buildIncidentEmbed(inc, nil, inclusionReason, report.Timezone)
+	embed := buildIncidentEmbed(report, inc, nil, inclusionReason)
 
 	cause, actions, evidence := triageFindings(evList)
 
@@ -291,13 +291,16 @@ func reportFooter(report models.Report) *discordEmbedFooter {
 // status in the title, bold metadata fields, and the investigation findings.
 // A nil evList leaves the description empty, so the caller can put its own
 // header there (see buildSingleIncidentEmbed).
-func buildIncidentEmbed(inc models.Incident, evList []models.Evidence, inclusionReason, timezone string) discordEmbed {
-	loc := loadLocation(timezone)
+func buildIncidentEmbed(report models.Report, inc models.Incident, evList []models.Evidence, inclusionReason string) discordEmbed {
+	loc := loadLocation(report.Timezone)
 
-	title := fmt.Sprintf("🚨 %s", inc.Title)
-	if inc.Status == "resolved" {
-		title = fmt.Sprintf("✅ %s", inc.Title)
-	}
+	// The report name leads the title. A bare "✅ RAM" was indistinguishable
+	// from an immediate alert card, which made a daily report containing a
+	// `warning` incident look like a warning alert that had bypassed the
+	// HIGH_SEVERITY_THRESHOLD gate. The gate was working; the card just never
+	// said where it came from. Status stays in the Status field and the bar
+	// colour, so the title is free to carry provenance.
+	title := fmt.Sprintf("%s · %s", reportLabel(report), inc.Title)
 
 	// Only fields that carry information are shown. A field reading "unknown"
 	// looks like a fact the investigation established; the truth is that the
@@ -354,7 +357,23 @@ func buildIncidentEmbed(inc models.Incident, evList []models.Evidence, inclusion
 		Description: description,
 		Color:       incidentColor(inc),
 		Fields:      fields,
+		Footer:      reportFooter(report),
 	}
+}
+
+// reportLabel names the report an incident card belongs to.
+//
+// Without it a report card is indistinguishable from an immediate alert card,
+// and that caused real confusion: a daily report containing a `warning`
+// incident looked like a warning alert that had bypassed the
+// HIGH_SEVERITY_THRESHOLD gate. The gate was working — those cards come from
+// the scheduled report, which summarizes every incident regardless of
+// severity — but nothing on the card said so.
+func reportLabel(report models.Report) string {
+	if report.ReportType == "daily" {
+		return "📅 Daily Report"
+	}
+	return "🚨 High-Severity Report"
 }
 
 // formatFindingsForEmbed renders investigation findings as a compact list that

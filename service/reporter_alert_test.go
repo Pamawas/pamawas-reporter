@@ -552,3 +552,31 @@ func TestOrdinal(t *testing.T) {
 		}
 	}
 }
+
+// TestReportCardsNameTheirReport pins provenance in the title.
+//
+// A bare "✅ RAM" card was indistinguishable from an immediate alert card, so a
+// daily report containing a `warning` incident read like a warning alert that
+// had bypassed HIGH_SEVERITY_THRESHOLD. The gate was working: those cards come
+// from the scheduled report, which covers every incident regardless of
+// severity. The title now says which it is.
+func TestReportCardsNameTheirReport(t *testing.T) {
+	inc := models.Incident{
+		ID: "inc_1", Title: "CPU", Status: "resolved", Severity: "warning",
+		Environment: "production", AffectedServices: []string{"kube-2"},
+		StartedAt: time.Now().Add(-5 * time.Minute), ResolvedAt: time.Now(),
+	}
+
+	daily := buildIncidentEmbed(models.Report{ReportType: "daily", Timezone: "UTC"}, inc, nil, "newly_started")
+	if !strings.HasPrefix(daily.Title, "📅 Daily Report") {
+		t.Errorf("daily card must name the daily report, got %q", daily.Title)
+	}
+	if !strings.Contains(daily.Title, "CPU") {
+		t.Errorf("title must still identify the incident, got %q", daily.Title)
+	}
+
+	high := buildIncidentEmbed(models.Report{ReportType: "high_severity", Timezone: "UTC"}, inc, nil, "newly_started")
+	if !strings.HasPrefix(high.Title, "🚨 High-Severity Report") {
+		t.Errorf("high-severity card must name its report, got %q", high.Title)
+	}
+}
