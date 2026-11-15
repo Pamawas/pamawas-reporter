@@ -291,8 +291,15 @@ type AlertPayload struct {
 	Title       string `json:"title"`
 	Severity    string `json:"severity"`
 	Environment string `json:"environment,omitempty"`
-	Services    string `json:"services,omitempty"`
-	StartedAt   string `json:"started_at,omitempty"` // RFC3339
+	// Services is the affected service when the source names one. Grafana's
+	// default alerting payload does not, so it is usually empty.
+	Services string `json:"services,omitempty"`
+	// Target is the concrete entity the alert is about (for Grafana, the
+	// `instance` label) and Job the scrape job that produced it. Together they
+	// answer "what is down" when the source names no service.
+	Target    string `json:"target,omitempty"`
+	Job       string `json:"job,omitempty"`
+	StartedAt string `json:"started_at,omitempty"` // RFC3339
 
 	// DedupKey identifies the alerting condition across repeats (Grafana
 	// re-fires the same alert every evaluation interval). Required: it backs

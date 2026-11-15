@@ -316,77 +316,99 @@ func truncateRunes(s string, limit int) string {
 	return string(runes[:limit-1]) + "…"
 }
 
-// buildAlertEmbed renders the immediate high-severity alert as a card.
+// alertSubject is the identity of what an alert is about. It exists so the
+// firing and resolved cards describe the subject identically — the same alert
+// must not read differently depending on whether it just fired or recovered.
+type alertSubject struct {
+	Title       string
+	Severity    string
+	Environment string
+	Services    string
+	Target      string
+	Job         string
+	StartedAt   time.Time
+}
+
+// fields renders the identity block shared by the firing and resolved cards.
 //
-// This is the firing notification: it carries the incident basics and says the
-// investigation will follow up. The follow-up report arrives later as its own
-// cards with the findings.
-func buildAlertEmbed(title, severity, environment, services string, startedAt time.Time) discordEmbed {
+// "What is down" is answered by whichever of these the source actually
+// provides. Grafana's default alerting payload names no service at all: it
+// carries the target (`instance`) and the scrape job (`job`). Rendering only
+// "Services" left those alerts reading "Services: grafana" — the sender, not
+// the subject — which is why the target and job are shown first.
+func (s alertSubject) fields() []discordEmbedField {
 	fields := []discordEmbedField{
-		{Name: "Severity", Value: fmt.Sprintf("%s %s", severityColor(severity), severity), Inline: true},
-		{Name: "Environment", Value: orUnknown(environment), Inline: true},
+		{Name: "Severity", Value: fmt.Sprintf("%s %s", severityColor(s.Severity), s.Severity), Inline: true},
+		{Name: "Environment", Value: orUnknown(s.Environment), Inline: true},
 	}
-	if services != "" {
-		fields = append(fields, discordEmbedField{Name: "Services", Value: services, Inline: true})
+	if s.Target != "" {
+		fields = append(fields, discordEmbedField{Name: "Target", Value: s.Target, Inline: true})
 	}
-	if !startedAt.IsZero() {
+	if s.Job != "" {
+		fields = append(fields, discordEmbedField{Name: "Job", Value: s.Job, Inline: true})
+	}
+	// Only show Services when it says something the target does not: sources
+	// that name no service leave it empty, and ingest derives it from the
+	// target otherwise, so repeating it would be noise.
+	if s.Services != "" && s.Services != s.Target {
+		fields = append(fields, discordEmbedField{Name: "Services", Value: s.Services, Inline: true})
+	}
+	if !s.StartedAt.IsZero() {
 		fields = append(fields, discordEmbedField{
 			Name:   "Started",
-			Value:  startedAt.UTC().Format("2006-01-02 15:04:05 UTC"),
+			Value:  s.StartedAt.UTC().Format("2006-01-02 15:04:05 UTC"),
 			Inline: true,
 		})
 	}
+	return fields
+}
 
+// trimAlertFields applies Discord's field limits to every field.
+func trimAlertFields(fields []discordEmbedField) []discordEmbedField {
 	for i := range fields {
 		fields[i].Name = truncateRunes(fields[i].Name, discordMaxFieldName)
 		fields[i].Value = truncateRunes(fields[i].Value, discordMaxFieldValue)
 	}
+	return fields
+}
 
+// buildAlertEmbed renders the immediate high-severity alert as a card.
+//
+// This is the firing notification: it carries the subject's identity and says
+// the investigation will follow up. The follow-up report arrives later as its
+// own cards with the findings.
+func buildAlertEmbed(subject alertSubject) discordEmbed {
+	fields := trimAlertFields(subject.fields())
 	return discordEmbed{
-		Title:       truncateRunes("🚨 "+title, discordMaxTitle),
+		Title:       truncateRunes("🚨 "+subject.Title, discordMaxTitle),
 		Description: "🔍 Investigation will follow up with findings once complete.",
-		Color:       severityEmbedColor(severity),
+		Color:       severityEmbedColor(subject.Severity),
 		Fields:      fields,
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}
 }
 
 // buildResolvedAlertEmbed renders the alert-resolved message as a card.
-func buildResolvedAlertEmbed(title, severity, environment, services string, resolvedAt, startedAt time.Time) discordEmbed {
-	fields := []discordEmbedField{
-		{Name: "Severity", Value: fmt.Sprintf("%s %s", severityColor(severity), severity), Inline: true},
-		{Name: "Environment", Value: orUnknown(environment), Inline: true},
-	}
-	if services != "" {
-		fields = append(fields, discordEmbedField{Name: "Services", Value: services, Inline: true})
-	}
-	if !startedAt.IsZero() {
-		fields = append(fields, discordEmbedField{
-			Name:   "Started",
-			Value:  startedAt.UTC().Format("2006-01-02 15:04:05 UTC"),
-			Inline: true,
-		})
-	}
+func buildResolvedAlertEmbed(subject alertSubject, resolvedAt time.Time) discordEmbed {
+	fields := subject.fields()
 	if !resolvedAt.IsZero() {
-		fields = append(fields, discordEmbedField{
-			Name:   "Resolved",
-			Value:  resolvedAt.UTC().Format("2006-01-02 15:04:05 UTC"),
-			Inline: true,
-		})
-		fields = append(fields, discordEmbedField{
-			Name:   "Downtime",
-			Value:  resolvedAt.Sub(startedAt).Round(time.Second).String(),
-			Inline: true,
-		})
+		fields = append(fields,
+			discordEmbedField{
+				Name:   "Resolved",
+				Value:  resolvedAt.UTC().Format("2006-01-02 15:04:05 UTC"),
+				Inline: true,
+			},
+			discordEmbedField{
+				Name:   "Downtime",
+				Value:  resolvedAt.Sub(subject.StartedAt).Round(time.Second).String(),
+				Inline: true,
+			},
+		)
 	}
-
-	for i := range fields {
-		fields[i].Name = truncateRunes(fields[i].Name, discordMaxFieldName)
-		fields[i].Value = truncateRunes(fields[i].Value, discordMaxFieldValue)
-	}
+	fields = trimAlertFields(fields)
 
 	return discordEmbed{
-		Title:       truncateRunes("✅ "+title, discordMaxTitle),
+		Title:       truncateRunes("✅ "+subject.Title, discordMaxTitle),
 		Description: "The alert has recovered and is no longer firing.",
 		Color:       discordColorResolved,
 		Fields:      fields,

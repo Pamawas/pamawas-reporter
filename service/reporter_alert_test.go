@@ -194,3 +194,81 @@ func TestAlertPathsUseEmbeds(t *testing.T) {
 		}
 	}
 }
+
+// TestAlertNamesTheTargetNotTheSender is the regression test for ambiguous
+// alerts: a Grafana alert names no service, and ingest used to fill the gap
+// with the literal "grafana" — the sender — so every card read
+// "Services: grafana" and never said what was actually down. The card must
+// name the target (Grafana's `instance`) and the job instead.
+func TestAlertNamesTheTargetNotTheSender(t *testing.T) {
+	var payloads []map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		payloads = append(payloads, p)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	r, mock := newMockReporter(t, ReporterConfig{
+		DiscordWebhookURL:     server.URL,
+		HighSeverityThreshold: "high",
+	})
+
+	payload := models.AlertPayload{
+		Title:       "Monitoring Target Down",
+		Severity:    "critical",
+		Environment: "production",
+		Target:      "last-labs",
+		Job:         "docker_cadvisor",
+		StartedAt:   time.Now().Add(-time.Minute).Format(time.RFC3339),
+		DedupKey:    "grafana:24188862b3fad691",
+	}
+
+	mock.ExpectQuery("INSERT INTO idempotency_records").
+		WillReturnRows(sqlmock.NewRows([]string{"key_hash"}).AddRow("hash"))
+	if _, err := r.SendAlert(context.Background(), payload); err != nil {
+		t.Fatalf("alert failed: %v", err)
+	}
+
+	if len(payloads) != 1 {
+		t.Fatalf("expected 1 webhook call, got %d", len(payloads))
+	}
+	embeds, ok := payloads[0]["embeds"].([]interface{})
+	if !ok || len(embeds) != 1 {
+		t.Fatalf("expected exactly 1 embed, got %#v", payloads[0]["embeds"])
+	}
+	embed, ok := embeds[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("embed is not an object: %#v", embeds[0])
+	}
+
+	got := map[string]string{}
+	fields, ok := embed["fields"].([]interface{})
+	if !ok {
+		t.Fatalf("embed has no fields: %#v", embed)
+	}
+	for _, f := range fields {
+		field, ok := f.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, hasName := field["name"].(string)
+		value, hasValue := field["value"].(string)
+		if hasName && hasValue {
+			got[name] = value
+		}
+	}
+
+	if got["Target"] != "last-labs" {
+		t.Errorf("card must name the target, got %q (fields: %v)", got["Target"], got)
+	}
+	if got["Job"] != "docker_cadvisor" {
+		t.Errorf("card must name the scrape job, got %q", got["Job"])
+	}
+	if _, hasServices := got["Services"]; hasServices {
+		t.Errorf("card must not repeat a derived service, got %q", got["Services"])
+	}
+}
