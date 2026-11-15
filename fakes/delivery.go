@@ -54,10 +54,10 @@ func (f *FakeDeliveryTransport) StartDiscordServer() *httptest.Server {
 		// Discord accepts either plain content or embeds. Reports and alerts
 		// are sent as embeds (bordered cards); record a readable form so tests
 		// can assert on what a user would actually see.
-		content, _ := payload["content"].(string)
-		if content == "" {
-			embeds, _ := payload["embeds"].([]interface{})
-			if len(embeds) == 0 {
+		content, hasContent := payload["content"].(string)
+		if !hasContent || content == "" {
+			embeds, hasEmbeds := payload["embeds"].([]interface{})
+			if !hasEmbeds || len(embeds) == 0 {
 				http.Error(w, "payload has neither content nor embeds", http.StatusBadRequest)
 				return
 			}
@@ -312,14 +312,20 @@ func renderEmbedsForTest(embeds []interface{}) string {
 		if desc, ok := embed["description"].(string); ok {
 			sb.WriteString(desc + "\n")
 		}
-		fields, _ := embed["fields"].([]interface{})
+		fields, hasFields := embed["fields"].([]interface{})
+		if !hasFields {
+			continue
+		}
 		for _, f := range fields {
 			field, ok := f.(map[string]interface{})
 			if !ok {
 				continue
 			}
-			name, _ := field["name"].(string)
-			value, _ := field["value"].(string)
+			name, hasName := field["name"].(string)
+			value, hasValue := field["value"].(string)
+			if !hasName || !hasValue {
+				continue
+			}
 			sb.WriteString(name + ": " + value + "\n")
 		}
 	}

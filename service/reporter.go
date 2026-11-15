@@ -1282,50 +1282,6 @@ func (r *Reporter) parseRetryAfter(header string, body []byte) time.Duration {
 	return 2 * time.Second
 }
 
-// chunkString splits s into slices of at most maxLen characters, preferring
-// to break at newlines when possible to avoid cutting words mid-line.
-func chunkString(s string, maxLen int) []string {
-	if len(s) == 0 {
-		return []string{""}
-	}
-	var chunks []string
-	for len(s) > 0 {
-		if len(s) <= maxLen {
-			chunks = append(chunks, s)
-			return chunks
-		}
-
-		// Try to break at a newline within the last quarter of the chunk
-		searchEnd := maxLen - maxLen/4
-		if searchEnd < 1 {
-			searchEnd = 1
-		}
-		searchStart := maxLen - searchEnd
-		if searchStart < 0 {
-			searchStart = 0
-		}
-
-		// Look for a newline in the search window
-		bestCut := -1
-		for i := searchStart; i < len(s) && i < searchEnd; i++ {
-			if s[i] == '\n' {
-				bestCut = i
-				break
-			}
-		}
-
-		if bestCut >= 0 {
-			chunks = append(chunks, s[:bestCut+1])
-			s = s[bestCut+1:]
-		} else {
-			// No newline found; cut at maxLen
-			chunks = append(chunks, s[:maxLen])
-			s = s[maxLen:]
-		}
-	}
-	return chunks
-}
-
 // sendToTelegram sends the report to Telegram via Bot API
 func (r *Reporter) sendToTelegram(ctx context.Context, report models.Report) error {
 	if r.config.TelegramBotToken == "" || r.config.TelegramChatID == "" {
@@ -1449,7 +1405,14 @@ func (r *Reporter) SendResolveAlert(ctx context.Context, payload models.AlertPay
 	} else {
 		// Event-sourced resolve: ingest forwards the resolved webhook directly.
 		title, severity, environment = payload.Title, payload.Severity, payload.Environment
-		startedAt, _ = time.Parse(time.RFC3339, payload.StartedAt)
+		if payload.StartedAt != "" {
+			parsed, parseErr := time.Parse(time.RFC3339, payload.StartedAt)
+			if parseErr != nil {
+				log.Warn().Err(parseErr).Str("started_at", payload.StartedAt).Msg("Invalid started_at in alert payload; omitting start time")
+			} else {
+				startedAt = parsed
+			}
+		}
 		resolvedAt = time.Now().UTC()
 	}
 
@@ -1584,7 +1547,14 @@ func (r *Reporter) SendAlert(ctx context.Context, payload models.AlertPayload) (
 // on the payload are used, which is the normal immediate-alert path.
 func (r *Reporter) alertDetails(ctx context.Context, payload models.AlertPayload, wantResolved bool) (title, severity, environment string, startedAt time.Time, err error) {
 	if payload.IncidentID == "" {
-		startedAt, _ = time.Parse(time.RFC3339, payload.StartedAt)
+		if payload.StartedAt != "" {
+			parsed, parseErr := time.Parse(time.RFC3339, payload.StartedAt)
+			if parseErr != nil {
+				log.Warn().Err(parseErr).Str("started_at", payload.StartedAt).Msg("Invalid started_at in alert payload; omitting start time")
+			} else {
+				startedAt = parsed
+			}
+		}
 		return payload.Title, payload.Severity, payload.Environment, startedAt, nil
 	}
 

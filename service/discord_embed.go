@@ -279,7 +279,7 @@ func (r *Reporter) loadReportIncidents(ctx context.Context, reportID string) ([]
 		ids = append(ids, id)
 		reasons[id] = reason
 	}
-	if err := rows.Err(); err != nil {
+	if err = rows.Err(); err != nil {
 		return nil, nil, err
 	}
 
