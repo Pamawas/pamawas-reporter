@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -34,6 +35,7 @@ const (
 	discordMaxFieldName   = 256
 	discordMaxFieldValue  = 1024
 	discordMaxFooter      = 2048
+	discordMaxThreadName  = 100
 )
 
 // Discord embed colors (colored bar down the left edge).
@@ -69,22 +71,46 @@ type discordEmbed struct {
 }
 
 // discordMessage is the webhook payload.
+// discordDelivery is a rendered report ready to send.
+//
+// Channel and thread are separated because they are read differently: the
+// channel gets one message a reader can scan, and the supporting detail goes
+// into a thread so it is available without pushing everything else off screen.
+type discordDelivery struct {
+	// Channel is the message posted to the channel.
+	Channel *discordMessage
+	// ThreadEmbeds are posted into the thread the Channel message creates.
+	// Empty when the report fits in one message.
+	ThreadEmbeds []discordEmbed
+}
+
 type discordMessage struct {
-	Username string         `json:"username"`
+	Username string `json:"username"`
 	Embeds   []discordEmbed `json:"embeds"`
+	// ThreadName creates a thread from this message and posts it there.
+	// Discord reads it from the create payload only, so it is never sent for
+	// follow-up posts into an existing thread.
+	ThreadName string `json:"thread_name,omitempty"`
 }
 
 // buildDiscordMessage renders a report as Discord embeds.
 //
-// A report about a single incident is ONE card: the report header (availability,
-// period) and the incident's identity and findings belong together, and
-// splitting them produced two cards for a notification that describes one
-// thing. Multi-incident reports keep a summary card followed by one card per
-// incident, because there the summary is genuinely a table of contents.
-func (r *Reporter) buildDiscordMessage(ctx context.Context, report models.Report) (*discordMessage, error) {
+// The three report shapes are read in different circumstances, so they render
+// differently:
+//
+//   - daily: a morning digest. ONE card listing what happened, with a detail
+//     card only for incidents that still need attention.
+//   - single incident: ONE card with the triage order (cause, actions,
+//     evidence), because it is read by whoever is on call right now.
+//   - multi-incident immediate: a summary card plus one card per incident.
+func (r *Reporter) buildDiscordMessage(ctx context.Context, report models.Report) (*discordDelivery, error) {
 	incidents, inclusionReasons, err := r.loadReportIncidents(ctx, report.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load report incidents: %w", err)
+	}
+
+	if report.ReportType == "daily" {
+		return r.buildDailyDigestMessage(ctx, report, incidents)
 	}
 
 	incidentIDs := make([]string, 0, len(incidents))
@@ -98,12 +124,12 @@ func (r *Reporter) buildDiscordMessage(ctx context.Context, report models.Report
 
 	if len(incidents) == 1 {
 		inc := incidents[0]
-		return &discordMessage{
+		return &discordDelivery{Channel: &discordMessage{
 			Username: "Pamawas Reporter",
 			Embeds: []discordEmbed{
 				r.buildSingleIncidentEmbed(report, inc, evidence[inc.ID], inclusionReasons[inc.ID]),
 			},
-		}, nil
+		}}, nil
 	}
 
 	embeds := []discordEmbed{r.buildSummaryEmbed(ctx, report, incidents)}
@@ -118,7 +144,173 @@ func (r *Reporter) buildDiscordMessage(ctx context.Context, report models.Report
 		embeds = append(embeds, buildIncidentEmbed(report, inc, evidence[inc.ID], inclusionReasons[inc.ID]))
 	}
 
-	return &discordMessage{Username: "Pamawas Reporter", Embeds: embeds}, nil
+	return &discordDelivery{Channel: &discordMessage{Username: "Pamawas Reporter", Embeds: embeds}}, nil
+}
+
+// buildDailyDigestMessage renders the daily report as a morning digest.
+//
+// A daily report is read on a phone before coffee, and it was previously
+// emitted as a summary card plus a full card per incident, each carrying the
+// complete investigation transcript. Five incidents became six cards of
+// scrolling in which the single incident still open was buried among four that
+// had already recovered on their own.
+//
+// The digest answers the three questions a reader actually has, in order:
+// what is still broken, what recovered, and what happened overall. Investigation
+// detail is included only for incidents that still need attention, because a
+// recovered incident's transcript is history nobody acts on at 8am.
+func (r *Reporter) buildDailyDigestMessage(ctx context.Context, report models.Report, incidents []models.Incident) (*discordDelivery, error) {
+	open, recovered := splitByStatus(incidents)
+
+	digest := r.buildDailyDigestEmbed(ctx, report, incidents, open, recovered)
+
+	// Per-incident detail for everything, in a thread. Recovered incidents get
+	// a detail card too — the morning reader may still want the transcript —
+	// but it must not occupy the channel to say so.
+	if len(incidents) == 0 {
+		return &discordDelivery{Channel: &discordMessage{
+			Username: "Pamawas Reporter",
+			Embeds:   []discordEmbed{digest},
+		}}, nil
+	}
+
+	ids := make([]string, 0, len(incidents))
+	for _, inc := range incidents {
+		ids = append(ids, inc.ID)
+	}
+	evidence, err := r.loadEvidenceForIncidents(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load evidence: %w", err)
+	}
+
+	// Needs-attention incidents come first in the thread, then the recovered.
+	ordered := append(append([]models.Incident{}, open...), recovered...)
+	details := make([]discordEmbed, 0, len(ordered))
+	for _, inc := range ordered {
+		if len(details) >= discordMaxEmbeds {
+			log.Warn().
+				Str("report_id", report.ID).
+				Int("omitted", len(ordered)-len(details)).
+				Msg("Discord embed limit reached; remaining incidents omitted from the thread")
+			break
+		}
+		details = append(details, buildIncidentEmbed(report, inc, evidence[inc.ID], ""))
+	}
+
+	return &discordDelivery{
+		Channel: &discordMessage{
+			Username: "Pamawas Reporter",
+			Embeds:   []discordEmbed{digest},
+			ThreadName: truncateRunes(
+				fmt.Sprintf("Details · %s", report.PeriodEnd.Format("2006-01-02")),
+				discordMaxThreadName),
+		},
+		ThreadEmbeds: details,
+	}, nil
+}
+
+// buildDailyDigestEmbed renders the digest itself: one scannable card.
+func (r *Reporter) buildDailyDigestEmbed(ctx context.Context, report models.Report, incidents, open, recovered []models.Incident) discordEmbed {
+	// The summary is fetched here, synchronously, so it is part of the message
+	// that goes out. It is never posted as a follow-up: a digest that arrives
+	// and then gains its headline a minute later is worse than one that never
+	// had one. summarizeDay is bounded by LLM_SUMMARY_TIMEOUT and returns ""
+	// on any failure, so delivery still happens on time without it.
+	summary := r.summarizeDay(ctx, report, incidents)
+
+	availability := r.getAvailabilityMetric(ctx, report.PeriodStart, report.PeriodEnd)
+	availabilityLine := "**Availability:** unavailable (no availability metric configured)"
+	if availability >= 0 {
+		availabilityLine = fmt.Sprintf("**Availability:** %.2f%%", availability)
+	}
+
+	var sb strings.Builder
+	if summary != "" {
+		sb.WriteString(summary)
+		sb.WriteString("\n\n")
+	}
+	fmt.Fprintf(&sb, "%s\n**%d incident(s)** · **%d** still open · **%d** recovered\n",
+		availabilityLine, len(incidents), len(open), len(recovered))
+
+	digestSection(&sb, "🔴 Needs attention", open, digestOpenLine)
+	digestSection(&sb, "✅ Recovered", recovered, digestRecoveredLine)
+
+	if len(incidents) == 0 {
+		sb.WriteString("\nNothing to report.")
+	}
+
+	// Red while anything is still open, green once everything recovered.
+	color := discordColorResolved
+	if len(open) > 0 {
+		color = discordColorCritical
+	}
+
+	return discordEmbed{
+		Title:       truncateRunes(fmt.Sprintf("📅 Daily Report · %s", report.PeriodEnd.Format("2006-01-02")), discordMaxTitle),
+		Description: truncateRunes(sb.String(), discordMaxDescription),
+		Color:       color,
+		Footer:      reportFooter(report),
+		Timestamp:   report.GeneratedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+// digestSection writes a titled list of one-line incident summaries.
+func digestSection(sb *strings.Builder, heading string, incidents []models.Incident, line func(models.Incident) string) {
+	if len(incidents) == 0 {
+		return
+	}
+	fmt.Fprintf(sb, "\n**%s**\n", heading)
+	for _, inc := range incidents {
+		// Leave room for the truncation notice rather than cutting mid-line.
+		if sb.Len() > discordMaxDescription-120 {
+			fmt.Fprintf(sb, "• _… and %d more_\n", len(incidents)-1)
+			return
+		}
+		sb.WriteString(line(inc))
+	}
+}
+
+// digestOpenLine summarises an incident that still needs attention.
+func digestOpenLine(inc models.Incident) string {
+	return fmt.Sprintf("• %s **%s** · %s · open since %s\n",
+		severityColor(inc.Severity), inc.Title, affectedLabel(inc),
+		inc.StartedAt.UTC().Format("15:04 UTC"))
+}
+
+// digestRecoveredLine summarises an incident that recovered, including how long
+// it was out. Findings are deliberately omitted: a recovered incident needs a
+// duration, not a transcript.
+func digestRecoveredLine(inc models.Incident) string {
+	duration := ""
+	if !inc.ResolvedAt.IsZero() {
+		duration = " · " + inc.ResolvedAt.Sub(inc.StartedAt).Round(time.Second).String()
+	}
+	return fmt.Sprintf("• %s **%s** · %s%s\n",
+		severityColor(inc.Severity), inc.Title, affectedLabel(inc), duration)
+}
+
+// splitByStatus partitions incidents into those still needing attention and
+// those already recovered, each sorted for reading: most severe first among the
+// open ones, most recent first among the recovered.
+func splitByStatus(incidents []models.Incident) (open, recovered []models.Incident) {
+	for _, inc := range incidents {
+		switch inc.Status {
+		case "open", "investigating":
+			open = append(open, inc)
+		default:
+			recovered = append(recovered, inc)
+		}
+	}
+	sort.SliceStable(open, func(i, j int) bool {
+		if a, b := severityRank(open[i].Severity), severityRank(open[j].Severity); a != b {
+			return a > b
+		}
+		return open[i].StartedAt.Before(open[j].StartedAt)
+	})
+	sort.SliceStable(recovered, func(i, j int) bool {
+		return recovered[i].ResolvedAt.After(recovered[j].ResolvedAt)
+	})
+	return open, recovered
 }
 
 // buildSingleIncidentEmbed renders a one-incident report as a card built for

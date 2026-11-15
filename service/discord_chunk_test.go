@@ -18,11 +18,17 @@ import (
 // summary card plus one bordered card per incident. Discord's proportional
 // font makes ASCII text boxes impossible to align, so the box comes from an
 // embed (colored left bar) instead of the text template.
-func TestSendToDiscordUsesEmbeds(t *testing.T) {
-	var raw map[string]interface{}
+func TestDailyReportSendsDigestAndThreadedDetail(t *testing.T) {
+	var payloads []map[string]interface{}
+	var paths []string
 	capture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&raw)
-		w.WriteHeader(http.StatusNoContent)
+		var body map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		payloads = append(payloads, body)
+		paths = append(paths, r.URL.String())
+		// wait=true (used for the channel message) gets the created message back.
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"msg_123"}`))
 	}))
 	defer capture.Close()
 
@@ -34,14 +40,14 @@ func TestSendToDiscordUsesEmbeds(t *testing.T) {
 		Timezone:        "UTC",
 		TemplateVersion: "pamawas-report-v2",
 		GeneratedAt:     time.Now(),
+		PeriodEnd:       time.Now(),
 	}
 
-	// The reporter loads the report's incidents and evidence from the database.
 	r, mock := newMockReporter(t, ReporterConfig{DiscordWebhookURL: capture.URL})
 	mock.ExpectQuery("SELECT ri.incident_id, ri.inclusion_reason").
 		WithArgs("test-id").
 		WillReturnRows(sqlmock.NewRows([]string{"incident_id", "inclusion_reason"}).
-			AddRow(incidentID, models.InclusionReasonHighSeverityImmediate))
+			AddRow(incidentID, models.InclusionReasonNewlyStarted))
 	// getIncidentsByIDs selects exactly these 10 columns.
 	mock.ExpectQuery("SELECT id, title, status, started_at, resolved_at, severity, environment").
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -62,25 +68,88 @@ func TestSendToDiscordUsesEmbeds(t *testing.T) {
 		t.Fatalf("sendToDiscord failed: %v", err)
 	}
 
-	embeds, ok := raw["embeds"].([]interface{})
-	require.True(t, ok, "payload must contain embeds")
-	// One incident means one card: the report header and the incident belong
-	// together, so splitting them into two cards was redundant.
-	require.Len(t, embeds, 1, "a single-incident report is one card")
-	_, hasContent := raw["content"]
+	require.Len(t, payloads, 2, "expected a channel message and one thread post")
+
+	// The channel message is the digest: one card a reader can scan.
+	channel, ok := payloads[0]["embeds"].([]interface{})
+	require.True(t, ok, "channel payload must contain embeds")
+	require.Len(t, channel, 1, "the channel gets exactly one digest card")
+	digest, _ := channel[0].(map[string]interface{})
+	require.Contains(t, digest["title"], "Daily Report")
+	desc, _ := digest["description"].(string)
+	require.Contains(t, desc, "Needs attention")
+	require.Contains(t, desc, "Monitoring Target Down")
+	// A digest states counts, not per-incident transcripts.
+	require.NotContains(t, desc, "CPU load spiked to 17")
+	require.NotEmpty(t, payloads[0]["thread_name"], "the digest creates a thread for detail")
+	_, hasContent := payloads[0]["content"]
 	require.False(t, hasContent, "reports must not be sent as plain content")
 
-	incidentEmbed, _ := embeds[0].(map[string]interface{})
-	require.Equal(t, float64(0xE74C3C), incidentEmbed["color"], "critical incident card must be red")
-	require.Contains(t, incidentEmbed["title"], "Monitoring Target Down")
-	require.Contains(t, incidentEmbed["description"], "CPU load spiked to 17")
-	// The card is built for triage: evidence, not report-generator metadata.
-	// "Availability: 100.00%" during a critical incident misleads, and the
-	// incident count says nothing about this incident.
-	desc, _ := incidentEmbed["description"].(string)
+	// The detail goes into that thread, so the channel stays scannable.
+	require.Contains(t, paths[1], "thread_id=msg_123")
+	thread, ok := payloads[1]["embeds"].([]interface{})
+	require.True(t, ok, "thread payload must contain embeds")
+	require.Len(t, thread, 1)
+	detail, _ := thread[0].(map[string]interface{})
+	require.Contains(t, detail["title"], "Monitoring Target Down")
+	detailDesc, _ := detail["description"].(string)
+	require.Contains(t, detailDesc, "CPU load spiked to 17")
+}
+
+// TestHighSeverityReportIsOneTriageCard verifies the immediate-report path is
+// untouched by the daily digest: a single incident still renders as ONE card in
+// triage order (cause, actions, evidence).
+func TestHighSeverityReportIsOneTriageCard(t *testing.T) {
+	var payloads []map[string]interface{}
+	capture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		payloads = append(payloads, body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"msg_1"}`))
+	}))
+	defer capture.Close()
+
+	incidentID := "inc_abc123"
+	report := models.Report{
+		ID: "test-id", ReportType: "high_severity", Timezone: "UTC",
+		TemplateVersion: "pamawas-report-v2", GeneratedAt: time.Now(),
+	}
+
+	r, mock := newMockReporter(t, ReporterConfig{DiscordWebhookURL: capture.URL})
+	mock.ExpectQuery("SELECT ri.incident_id, ri.inclusion_reason").
+		WithArgs("test-id").
+		WillReturnRows(sqlmock.NewRows([]string{"incident_id", "inclusion_reason"}).
+			AddRow(incidentID, models.InclusionReasonHighSeverityImmediate))
+	mock.ExpectQuery("SELECT id, title, status, started_at, resolved_at, severity, environment").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "title", "status", "started_at", "resolved_at",
+			"severity", "environment", "affected_services",
+			"correlation_policy", "correlation_version",
+		}).AddRow(incidentID, "Monitoring Target Down", "open", time.Now(),
+			nil, "critical", "production", "{last-labs}", "service_time_window", 1))
+	mock.ExpectQuery("FROM evidence e").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "incident_id", "type", "content", "source", "source_detail",
+			"confidence", "supports_evidence", "contradicts_evidence", "ordinal",
+		}).AddRow("evd_1", incidentID, "fact", "CPU load spiked to 17",
+			"prometheus", "node_load1", 0.95, "{}", "{}", 0))
+
+	if err := r.sendToDiscord(context.Background(), report); err != nil {
+		t.Fatalf("sendToDiscord failed: %v", err)
+	}
+
+	require.Len(t, payloads, 1, "a single-incident report is one message, no thread")
+	embeds, ok := payloads[0]["embeds"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, embeds, 1, "one incident means one card")
+
+	card, _ := embeds[0].(map[string]interface{})
+	require.Equal(t, float64(0xE74C3C), card["color"], "critical incident card must be red")
+	desc, _ := card["description"].(string)
 	require.Contains(t, desc, "Supporting evidence")
+	require.Contains(t, desc, "CPU load spiked to 17")
 	require.NotContains(t, desc, "Availability:")
-	require.NotContains(t, desc, "Incidents:")
 }
 
 // TestSendToDiscordRateLimitRetry verifies a Discord 429 with Retry-After is

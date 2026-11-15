@@ -33,6 +33,12 @@ type Config struct {
 	AvailabilityMetric string
 	// Report rendering template: "v1" (legacy plain text) or "v2" (Uptime Kuma-style card layout).
 	ReportTemplate string
+	// Base URL of the investigator service, which owns all LLM usage. The daily
+	// report asks it for a prose summary; when unset or unreachable the digest
+	// renders the deterministic incident lists instead.
+	InvestigatorURL string
+	// Hard cap on the summary call. Delivery must not wait on a slow model.
+	SummaryTimeout time.Duration
 	// Delivery-channel circuit breaker (centralized; was hard-coded 3 / 30s in
 	// service.NewReporter).
 	CircuitBreakerFailureThreshold int
@@ -117,6 +123,12 @@ func Load() Config {
 	if err := v.BindEnv("circuit_breaker_reset_timeout", "CIRCUIT_BREAKER_RESET_TIMEOUT"); err != nil {
 		panic(fmt.Sprintf("failed to bind CIRCUIT_BREAKER_RESET_TIMEOUT env: %v", err))
 	}
+	if err := v.BindEnv("investigator_url", "INVESTIGATOR_URL", "PAMAWAS_REPORTER_INVESTIGATOR_URL"); err != nil {
+		panic(fmt.Sprintf("failed to bind INVESTIGATOR_URL env: %v", err))
+	}
+	if err := v.BindEnv("summary_timeout", "SUMMARY_TIMEOUT"); err != nil {
+		panic(fmt.Sprintf("failed to bind SUMMARY_TIMEOUT env: %v", err))
+	}
 	if err := v.BindEnv("rate_limit_rps", "RATE_LIMIT_RPS"); err != nil {
 		panic(fmt.Sprintf("failed to bind RATE_LIMIT_RPS env: %v", err))
 	}
@@ -132,6 +144,7 @@ func Load() Config {
 	v.SetDefault("high_severity_threshold", "high")
 	v.SetDefault("high_severity_investigation_timeout", "5m")
 	v.SetDefault("report_template", "v1")
+	v.SetDefault("summary_timeout", "20s")
 	v.SetDefault("circuit_breaker_failure_threshold", 3)
 	v.SetDefault("circuit_breaker_reset_timeout", "30s")
 	v.SetDefault("rate_limit_rps", 10)
@@ -163,6 +176,8 @@ func Load() Config {
 		PrometheusURL:                    v.GetString("prometheus_url"),
 		AvailabilityMetric:               v.GetString("availability_metric"),
 		ReportTemplate:                   v.GetString("report_template"),
+		InvestigatorURL:                  v.GetString("investigator_url"),
+		SummaryTimeout:                   v.GetDuration("summary_timeout"),
 		CircuitBreakerFailureThreshold:   v.GetInt("circuit_breaker_failure_threshold"),
 		CircuitBreakerResetTimeout:       v.GetDuration("circuit_breaker_reset_timeout"),
 		RateLimitRPS:                     v.GetFloat64("rate_limit_rps"),

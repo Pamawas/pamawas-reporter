@@ -580,3 +580,67 @@ func TestReportCardsNameTheirReport(t *testing.T) {
 		t.Errorf("high-severity card must name its report, got %q", high.Title)
 	}
 }
+
+// TestSummarizeDayCallsTheInvestigator verifies the reporter asks the
+// investigator for the prose summary. All LLM access lives there; the reporter
+// holds no model credentials.
+func TestSummarizeDayCallsTheInvestigator(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"summary":"One target briefly down; all recovered."}`))
+	}))
+	defer server.Close()
+
+	r, _ := newMockReporter(t, ReporterConfig{
+		InvestigatorURL:       server.URL,
+		SummaryTimeout:        2 * time.Second,
+		HighSeverityThreshold: "high",
+	})
+
+	summary := r.summarizeDay(context.Background(), models.Report{
+		PeriodStart: time.Now().Add(-24 * time.Hour), PeriodEnd: time.Now(), Timezone: "UTC",
+	}, []models.Incident{{Title: "RAM", Severity: "warning", Status: "resolved",
+		AffectedServices: []string{"koba-labs"}, StartedAt: time.Now().Add(-time.Hour),
+		ResolvedAt: time.Now()}})
+
+	if gotPath != "/api/v1/summaries" {
+		t.Errorf("expected the investigator summary endpoint, got %q", gotPath)
+	}
+	if summary != "One target briefly down; all recovered." {
+		t.Errorf("unexpected summary %q", summary)
+	}
+}
+
+// TestSummarizeDayDegradesQuietly verifies the digest never depends on the
+// summary: an unreachable or failing investigator yields "", and the report
+// still goes out with its deterministic lists.
+func TestSummarizeDayDegradesQuietly(t *testing.T) {
+	incidents := []models.Incident{{Title: "RAM", Severity: "warning", Status: "resolved"}}
+	report := models.Report{Timezone: "UTC"}
+
+	// Not configured at all.
+	r, _ := newMockReporter(t, ReporterConfig{HighSeverityThreshold: "high"})
+	if got := r.summarizeDay(context.Background(), report, incidents); got != "" {
+		t.Errorf("expected no summary when unconfigured, got %q", got)
+	}
+
+	// Configured but unreachable.
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer failing.Close()
+	r2, _ := newMockReporter(t, ReporterConfig{
+		InvestigatorURL: failing.URL, SummaryTimeout: 2 * time.Second,
+	})
+	if got := r2.summarizeDay(context.Background(), report, incidents); got != "" {
+		t.Errorf("expected no summary on a 5xx, got %q", got)
+	}
+
+	// No incidents: nothing to summarise, and no call should be made.
+	r3, _ := newMockReporter(t, ReporterConfig{InvestigatorURL: failing.URL})
+	if got := r3.summarizeDay(context.Background(), report, nil); got != "" {
+		t.Errorf("expected no summary without incidents, got %q", got)
+	}
+}

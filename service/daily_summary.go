@@ -1,0 +1,119 @@
+package service
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/rs/zerolog/log"
+
+	"github.com/Pamawas/pamawas-reporter/models"
+)
+
+// summarizeDay asks the investigator for a short prose summary of the report.
+//
+// LLM access lives in the investigator service, which owns the model endpoints,
+// credentials and prompts; the reporter only ever calls it over HTTP. The call
+// is made while rendering, before the message is posted, so the summary is part
+// of the digest that goes out rather than arriving as a follow-up.
+//
+// It returns "" for every failure mode — not configured, unreachable, timeout,
+// empty reply — because a daily report that arrives without a narrative is far
+// better than one that does not arrive. Callers render the deterministic
+// incident lists either way.
+func (r *Reporter) summarizeDay(ctx context.Context, report models.Report, incidents []models.Incident) string {
+	if r.config.InvestigatorURL == "" || len(incidents) == 0 {
+		return ""
+	}
+
+	timeout := r.config.SummaryTimeout
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	payload := dailySummaryRequest{
+		PeriodStart: report.PeriodStart.Format(time.RFC3339),
+		PeriodEnd:   report.PeriodEnd.Format(time.RFC3339),
+		Timezone:    report.Timezone,
+	}
+	for _, inc := range incidents {
+		item := dailySummaryIncident{
+			Title:     inc.Title,
+			Severity:  inc.Severity,
+			Status:    inc.Status,
+			Affected:  affectedLabel(inc),
+			StartedAt: inc.StartedAt.Format(time.RFC3339),
+		}
+		if !inc.ResolvedAt.IsZero() {
+			item.ResolvedAt = inc.ResolvedAt.Format(time.RFC3339)
+			item.Duration = inc.ResolvedAt.Sub(inc.StartedAt).Round(time.Second).String()
+		}
+		payload.Incidents = append(payload.Incidents, item)
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to marshal daily summary request")
+		return ""
+	}
+
+	url := strings.TrimRight(r.config.InvestigatorURL, "/") + "/api/v1/summaries"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to create daily summary request")
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		log.Warn().Err(err).Msg("Daily summary request failed; digest continues without it")
+		return ""
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close daily summary response body")
+		}
+	}()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Warn().Int("status", resp.StatusCode).
+			Msg("Investigator returned a non-2xx status for the daily summary; digest continues without it")
+		return ""
+	}
+
+	var out struct {
+		Summary string `json:"summary"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		log.Warn().Err(err).Msg("Failed to decode daily summary response")
+		return ""
+	}
+
+	return strings.TrimSpace(out.Summary)
+}
+
+// dailySummaryRequest is the fact sheet the investigator summarises. It carries
+// structured facts only — no transcripts — so the summary cannot drift into
+// inventing detail that was never observed.
+type dailySummaryRequest struct {
+	PeriodStart string                `json:"period_start"`
+	PeriodEnd   string                `json:"period_end"`
+	Timezone    string                `json:"timezone"`
+	Incidents   []dailySummaryIncident `json:"incidents"`
+}
+
+type dailySummaryIncident struct {
+	Title      string `json:"title"`
+	Severity   string `json:"severity"`
+	Status     string `json:"status"`
+	Affected   string `json:"affected"`
+	StartedAt  string `json:"started_at"`
+	ResolvedAt string `json:"resolved_at,omitempty"`
+	Duration   string `json:"duration,omitempty"`
+}

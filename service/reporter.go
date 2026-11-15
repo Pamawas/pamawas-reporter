@@ -59,6 +59,12 @@ type ReporterConfig struct {
 	AvailabilityMetric string
 	// Report rendering template: "v1" (legacy plain text) or "v2" (Uptime Kuma-style card layout).
 	ReportTemplate string
+	// InvestigatorURL is where the daily digest's prose summary comes from.
+	// LLM access lives in the investigator; the reporter only calls it.
+	InvestigatorURL string
+	// SummaryTimeout caps the digest summary call so a slow model cannot delay
+	// report delivery.
+	SummaryTimeout time.Duration
 	// Circuit breaker for delivery channels: consecutive failures before the
 	// breaker opens, and how long it stays open before a trial call.
 	// Centralized here per the design review (was hard-coded 3 / 30s).
@@ -1232,25 +1238,149 @@ func (r *Reporter) classifyError(err error) string {
 // by one bordered card per incident. Discord's proportional font makes text
 // boxes impossible to align, so the bordered card comes from embeds (colored
 // left bar + boxed body) rather than the text template.
+// sendToDiscord delivers a report to Discord.
+//
+// The channel gets the report's main message. Supporting detail is posted into
+// the thread that message created, so a reader scanning the channel sees one
+// card per report instead of a wall of incident transcripts, while the detail
+// stays one click away.
 func (r *Reporter) sendToDiscord(ctx context.Context, report models.Report) error {
 	if r.config.DiscordWebhookURL == "" {
 		return nil
 	}
 
-	message, err := r.buildDiscordMessage(ctx, report)
+	delivery, err := r.buildDiscordMessage(ctx, report)
 	if err != nil {
 		return fmt.Errorf("failed to render Discord embeds: %w", err)
 	}
 
-	payloadBytes, err := json.Marshal(message)
+	channelBytes, err := json.Marshal(delivery.Channel)
 	if err != nil {
 		return fmt.Errorf("failed to marshal Discord payload: %w", err)
 	}
 
-	if err := r.sendDiscordChunkWithRetry(ctx, 0, payloadBytes); err != nil {
-		return err
+	// wait=true makes Discord return the created message, which is where the
+	// thread id comes from. Discord seeds the thread from this message when
+	// thread_name is set, and the message id is the thread id.
+	body, postErr := r.postDiscord(ctx, channelBytes, url.Values{"wait": {"true"}})
+	if postErr != nil {
+		return postErr
+	}
+
+	if len(delivery.ThreadEmbeds) == 0 {
+		return nil
+	}
+
+	var created struct {
+		ID string `json:"id"`
+	}
+	threadID := ""
+	if err := json.Unmarshal(body, &created); err != nil || created.ID == "" {
+		// Without a thread id the detail cannot be threaded, but it must still
+		// be delivered: post it to the channel rather than losing it.
+		log.Warn().Err(err).Str("report_id", report.ID).
+			Msg("Discord returned no message id; posting report detail to the channel")
+	}
+	threadID = created.ID
+
+	return r.postDiscordEmbeds(ctx, delivery.ThreadEmbeds, threadID)
+}
+
+// postDiscordEmbeds sends embeds in batches, into the given thread when threadID
+// is set and to the channel otherwise.
+func (r *Reporter) postDiscordEmbeds(ctx context.Context, embeds []discordEmbed, threadID string) error {
+	for start := 0; start < len(embeds); start += discordMaxEmbeds {
+		end := min(start+discordMaxEmbeds, len(embeds))
+		payload := discordMessage{
+			Username: "Pamawas Reporter",
+			Embeds:   embeds[start:end],
+		}
+		payloadBytes, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal Discord detail payload: %w", err)
+		}
+
+		var params url.Values
+		if threadID != "" {
+			params = url.Values{"thread_id": {threadID}}
+		}
+		if _, err := r.postDiscord(ctx, payloadBytes, params); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// postDiscord POSTs a payload to the webhook and returns the response body.
+// Retries transient failures and honours Discord's 429 retry_after.
+func (r *Reporter) postDiscord(ctx context.Context, payloadBytes []byte, params url.Values) ([]byte, error) {
+	endpoint := r.config.DiscordWebhookURL
+	if len(params) > 0 {
+		sep := "?"
+		if strings.Contains(endpoint, "?") {
+			sep = "&"
+		}
+		endpoint += sep + params.Encode()
+	}
+
+	const maxRetries = 3
+	const baseRetryDelay = 2 * time.Second
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := r.httpClient.Do(req)
+		if err != nil {
+			log.Error().Err(err).Int("attempt", attempt+1).Msg("Failed to send Discord webhook request")
+			if attempt == maxRetries {
+				return nil, err
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(baseRetryDelay * time.Duration(attempt+1)):
+			}
+			continue
+		}
+
+		respBody, readErr := io.ReadAll(resp.Body)
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close Discord response body")
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("failed to read Discord response: %w", readErr)
+		}
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			log.Info().Int("bytes", len(payloadBytes)).Msg("Discord webhook sent successfully")
+			return respBody, nil
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			retryAfter := r.parseRetryAfter(resp.Header.Get("Retry-After"), respBody)
+			log.Warn().Int("attempt", attempt+1).Dur("retry_after", retryAfter).
+				Msg("Discord rate limited (429), will retry")
+			if attempt == maxRetries {
+				return nil, fmt.Errorf("discord webhook rate limited after %d retries", maxRetries)
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(retryAfter):
+			}
+			continue
+		}
+
+		err = fmt.Errorf("discord webhook returned status %d", resp.StatusCode)
+		log.Error().Err(err).Int("attempt", attempt+1).Msg("Discord webhook error")
+		return nil, err
+	}
+
+	return nil, fmt.Errorf("discord webhook: max retries exhausted")
 }
 
 // sendDiscordChunkWithRetry sends a single chunk with retry logic for rate limits (429)
