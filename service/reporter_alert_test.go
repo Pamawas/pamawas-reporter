@@ -39,14 +39,14 @@ func newAlertTestReporter(t *testing.T, threshold string) (*Reporter, sqlmock.Sq
 }
 
 func TestSendAlertSkipsBelowThreshold(t *testing.T) {
-	r, mock, calls := newAlertTestReporter(t, "high")
+	r, _, calls := newAlertTestReporter(t, "high")
 
-	mock.ExpectQuery("SELECT title, severity, environment, started_at FROM incidents").
-		WithArgs("inc_warn").
-		WillReturnRows(sqlmock.NewRows([]string{"title", "severity", "environment", "started_at"}).
-			AddRow("Warning alert", "warning", "production", time.Now().Add(-time.Hour)))
-
-	resp, err := r.SendAlert(context.Background(), models.AlertPayload{IncidentID: "inc_warn"})
+	resp, err := r.SendAlert(context.Background(), models.AlertPayload{
+		Title:       "Warning alert",
+		Severity:    "warning",
+		Environment: "production",
+		DedupKey:    "grafana:warn1",
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -61,19 +61,20 @@ func TestSendAlertSkipsBelowThreshold(t *testing.T) {
 func TestSendAlertOneShotClaim(t *testing.T) {
 	r, mock, calls := newAlertTestReporter(t, "high")
 
-	incidentRow := func() *sqlmock.Rows {
-		return sqlmock.NewRows([]string{"title", "severity", "environment", "started_at"}).
-			AddRow("Critical alert", "critical", "production", time.Now().Add(-time.Hour))
+	// Alert details come from the event, so no incident lookup is needed.
+	payload := models.AlertPayload{
+		Title:       "Critical alert",
+		Severity:    "critical",
+		Environment: "production",
+		StartedAt:   time.Now().Add(-time.Hour).Format(time.RFC3339),
+		DedupKey:    "grafana:abc123",
 	}
 
-	mock.ExpectQuery("SELECT title, severity, environment, started_at FROM incidents").
-		WithArgs("inc_crit").WillReturnRows(incidentRow())
-	// Claim succeeds the first time.
-	mock.ExpectQuery("UPDATE incidents").
-		WithArgs("inc_crit").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("inc_crit"))
+	// First fire claims the condition.
+	mock.ExpectQuery("INSERT INTO idempotency_records").
+		WillReturnRows(sqlmock.NewRows([]string{"key_hash"}).AddRow("hash"))
 
-	resp, err := r.SendAlert(context.Background(), models.AlertPayload{IncidentID: "inc_crit"})
+	resp, err := r.SendAlert(context.Background(), payload)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -84,14 +85,11 @@ func TestSendAlertOneShotClaim(t *testing.T) {
 		t.Fatalf("expected exactly 1 delivery, got %d", got)
 	}
 
-	// A second forward (Grafana re-fire) finds the claim already taken.
-	mock.ExpectQuery("SELECT title, severity, environment, started_at FROM incidents").
-		WithArgs("inc_crit").WillReturnRows(incidentRow())
-	mock.ExpectQuery("UPDATE incidents").
-		WithArgs("inc_crit").
+	// A Grafana re-fire finds the claim already taken.
+	mock.ExpectQuery("INSERT INTO idempotency_records").
 		WillReturnError(sql.ErrNoRows)
 
-	resp, err = r.SendAlert(context.Background(), models.AlertPayload{IncidentID: "inc_crit"})
+	resp, err = r.SendAlert(context.Background(), payload)
 	if err != nil {
 		t.Fatalf("unexpected error on re-fire: %v", err)
 	}
@@ -104,18 +102,18 @@ func TestSendAlertOneShotClaim(t *testing.T) {
 }
 
 func TestSendResolveAlertGatesOnSameThreshold(t *testing.T) {
-	r, mock, calls := newAlertTestReporter(t, "high")
+	r, _, calls := newAlertTestReporter(t, "high")
 
-	mock.ExpectQuery("SELECT title, severity, environment, resolved_at, started_at FROM incidents").
-		WithArgs("inc_warn").
-		WillReturnRows(sqlmock.NewRows([]string{"title", "severity", "environment", "resolved_at", "started_at"}).
-			AddRow("Warning alert", "warning", "production", time.Now(), time.Now().Add(-time.Hour)))
-
-	resp, err := r.SendResolveAlert(context.Background(), models.AlertPayload{IncidentID: "inc_warn"})
+	resp, err := r.SendResolveAlert(context.Background(), models.AlertPayload{
+		Title:       "Warning alert",
+		Severity:    "warning",
+		Environment: "production",
+		DedupKey:    "grafana:warn1",
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if resp.Sent || !resp.Skipped || resp.Reason != "severity_not_high_critical" {
+	if resp.Sent || !resp.Skipped || resp.Reason != "severity_below_threshold" {
 		t.Fatalf("expected resolve skip on low severity, got %+v", resp)
 	}
 	if got := atomic.LoadInt32(calls); got != 0 {
@@ -143,27 +141,26 @@ func TestAlertPathsUseEmbeds(t *testing.T) {
 		HighSeverityThreshold: "high",
 	})
 
-	// Firing alert.
-	mock.ExpectQuery("SELECT title, severity, environment, started_at FROM incidents").
-		WithArgs("inc_crit").
-		WillReturnRows(sqlmock.NewRows([]string{"title", "severity", "environment", "started_at"}).
-			AddRow("Monitoring Target Down", "critical", "production", time.Now().Add(-time.Hour)))
-	mock.ExpectQuery("UPDATE incidents").
-		WithArgs("inc_crit").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("inc_crit"))
+	payload := models.AlertPayload{
+		Title:       "Monitoring Target Down",
+		Severity:    "critical",
+		Environment: "production",
+		StartedAt:   time.Now().Add(-time.Hour).Format(time.RFC3339),
+		DedupKey:    "grafana:down1",
+	}
 
-	resp, err := r.SendAlert(context.Background(), models.AlertPayload{IncidentID: "inc_crit"})
+	// Firing alert: claim succeeds, then delivers.
+	mock.ExpectQuery("INSERT INTO idempotency_records").
+		WillReturnRows(sqlmock.NewRows([]string{"key_hash"}).AddRow("hash"))
+	resp, err := r.SendAlert(context.Background(), payload)
 	if err != nil || !resp.Sent {
 		t.Fatalf("alert failed: resp=%+v err=%v", resp, err)
 	}
 
-	// Resolved alert.
-	mock.ExpectQuery("SELECT title, severity, environment, resolved_at, started_at FROM incidents").
-		WithArgs("inc_crit").
-		WillReturnRows(sqlmock.NewRows([]string{"title", "severity", "environment", "resolved_at", "started_at"}).
-			AddRow("Monitoring Target Down", "critical", "production", time.Now(), time.Now().Add(-time.Hour)))
-
-	resp, err = r.SendResolveAlert(context.Background(), models.AlertPayload{IncidentID: "inc_crit"})
+	// Resolved alert: releases the claim, then delivers.
+	mock.ExpectExec("DELETE FROM idempotency_records").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	resp, err = r.SendResolveAlert(context.Background(), payload)
 	if err != nil || !resp.Sent {
 		t.Fatalf("resolved alert failed: resp=%+v err=%v", resp, err)
 	}

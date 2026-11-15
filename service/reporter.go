@@ -3,7 +3,9 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1424,41 +1426,57 @@ func (r *Reporter) SendResolveAlert(ctx context.Context, payload models.AlertPay
 		title       string
 		severity    string
 		environment string
-		resolvedAt  sql.NullTime
 		startedAt   time.Time
+		resolvedAt  time.Time
 	)
-	row := r.db.QueryRowContext(ctx, `SELECT title, severity, environment, resolved_at, started_at FROM incidents WHERE id = $1`, payload.IncidentID)
-	if err := row.Scan(&title, &severity, &environment, &resolvedAt, &startedAt); err != nil {
-		if err == sql.ErrNoRows {
-			return &models.AlertResponse{
-				IncidentID: payload.IncidentID,
-				Sent:       false,
-				Skipped:    true,
-				Reason:     "incident_not_found",
-				Message:    "incident not found",
-			}, nil
+
+	if payload.IncidentID != "" {
+		var resolved sql.NullTime
+		row := r.db.QueryRowContext(ctx, `SELECT title, severity, environment, resolved_at, started_at FROM incidents WHERE id = $1`, payload.IncidentID)
+		if err := row.Scan(&title, &severity, &environment, &resolved, &startedAt); err != nil {
+			if err == sql.ErrNoRows {
+				return &models.AlertResponse{
+					IncidentID: payload.IncidentID,
+					Sent:       false,
+					Skipped:    true,
+					Reason:     "incident_not_found",
+					Message:    "incident not found",
+				}, nil
+			}
+			return nil, err
 		}
-		return nil, err
+		resolvedAt = resolved.Time
+	} else {
+		// Event-sourced resolve: ingest forwards the resolved webhook directly.
+		title, severity, environment = payload.Title, payload.Severity, payload.Environment
+		startedAt, _ = time.Parse(time.RFC3339, payload.StartedAt)
+		resolvedAt = time.Now().UTC()
 	}
 
-	// Resolve notifications only for severity at or above the configured
-	// threshold (default "high" => high/critical only), so we don't buzz for
-	// low-level alerts.
+	// Resolve messages only for severity at or above the configured threshold
+	// (default "high" => high/critical only), so we don't buzz for low-level
+	// alerts. Same gate as the firing alert.
 	if severityRank(severity) < severityRank(r.config.HighSeverityThreshold) {
 		return &models.AlertResponse{
 			IncidentID: payload.IncidentID,
 			Sent:       false,
 			Skipped:    true,
-			Reason:     "severity_not_high_critical",
-			Message:    fmt.Sprintf("resolve notification skipped: severity %s is not high/critical", severity),
+			Reason:     "severity_below_threshold",
+			Message:    fmt.Sprintf("resolve notification skipped: severity %s is below threshold %s", severity, r.config.HighSeverityThreshold),
 		}, nil
 	}
 
 	sent, firstErr := r.deliverAlert(ctx, payload.IncidentID, alertContent{
-		Text:    formatResolvedAlertMessage(payload.IncidentID, title, severity, environment, resolvedAt.Time, startedAt),
+		Text:    formatResolvedAlertMessage(payload.IncidentID, title, severity, environment, resolvedAt, startedAt),
 		Subject: "Alert resolved: " + title,
-		Embed:   buildResolvedAlertEmbed(payload.IncidentID, title, severity, environment, resolvedAt.Time, startedAt),
+		Embed:   buildResolvedAlertEmbed(payload.IncidentID, title, severity, environment, resolvedAt, startedAt),
 	})
+
+	// The alert resolved, so release the one-shot claim: if this condition
+	// fires again later it must alert again.
+	if relErr := r.releaseAlertClaim(ctx, r.alertDedupKey(payload)); relErr != nil {
+		log.Error().Err(relErr).Msg("Failed to release alert claim on resolve")
+	}
 
 	if !sent && firstErr != nil {
 		return &models.AlertResponse{
@@ -1478,43 +1496,35 @@ func (r *Reporter) SendResolveAlert(ctx context.Context, payload models.AlertPay
 	}, nil
 }
 
-// SendAlert sends the immediate high-severity alert for a firing incident.
+// SendAlert sends the immediate high-severity alert for a firing event.
 //
-// This is the event-driven counterpart of SendResolveAlert: ingest
-// forwards the first firing event for an incident as soon as it is persisted,
-// instead of the scheduler discovering it on its next 30-second poll. The
-// follow-up report (with investigation evidence) remains scheduler-owned.
+// Ingest calls this the moment the webhook event is persisted. It deliberately
+// does NOT require an incident: the correlator creates incidents on its own
+// cycle, and an immediate alert must not wait for that (or be dropped when the
+// cycle is slow). The alert is rendered from the event's own details.
 //
-// Alerting is one-shot per incident, enforced by an atomic claim on
-// incidents.alert_notified_at. Grafana re-fires a sustained alert every
-// evaluation interval, and every re-fire correlates into the same open
-// incident — without the claim the user would be buzzed continuously. A
-// resolved-then-refired alert correlates into a NEW incident row (resolved
-// incidents are not correlation candidates), so it alerts again naturally.
+// Alerting is one-shot per condition. Grafana re-fires a sustained alert every
+// evaluation interval; the atomic claim on DedupKey (backed by
+// idempotency_records, so concurrent forwards cannot both win) keeps the user
+// from being buzzed continuously. When the alert resolves, SendResolveAlert
+// releases the claim so a later re-fire alerts again.
 func (r *Reporter) SendAlert(ctx context.Context, payload models.AlertPayload) (*models.AlertResponse, error) {
-	var (
-		title       string
-		severity    string
-		environment string
-		startedAt   time.Time
-	)
-	row := r.db.QueryRowContext(ctx, `SELECT title, severity, environment, started_at FROM incidents WHERE id = $1`, payload.IncidentID)
-	if err := row.Scan(&title, &severity, &environment, &startedAt); err != nil {
-		if err == sql.ErrNoRows {
-			return &models.AlertResponse{
-				IncidentID: payload.IncidentID,
-				Sent:       false,
-				Skipped:    true,
-				Reason:     "incident_not_found",
-				Message:    "incident not found",
-			}, nil
-		}
+	title, severity, environment, startedAt, err := r.alertDetails(ctx, payload, false)
+	if err != nil {
 		return nil, err
 	}
+	if title == "" {
+		return &models.AlertResponse{
+			IncidentID: payload.IncidentID,
+			Sent:       false,
+			Skipped:    true,
+			Reason:     "incident_not_found",
+			Message:    "incident not found",
+		}, nil
+	}
 
-	// Alerts fire only at or above the configured threshold (default "high"
-	// => high/critical). Checked before claiming so a low-severity incident
-	// does not consume its one-shot claim.
+	// Severity gate before claiming, so a below-threshold event never consumes
+	// the one-shot claim.
 	if severityRank(severity) < severityRank(r.config.HighSeverityThreshold) {
 		return &models.AlertResponse{
 			IncidentID: payload.IncidentID,
@@ -1525,27 +1535,19 @@ func (r *Reporter) SendAlert(ctx context.Context, payload models.AlertPayload) (
 		}, nil
 	}
 
-	// One-shot claim. UPDATE ... WHERE alert_notified_at IS NULL is atomic, so
-	// concurrent forwards of the same incident (Grafana retries, duplicate
-	// webhooks racing) cannot double-alert.
-	var claimedID string
-	err := r.db.QueryRowContext(ctx, `
-		UPDATE incidents
-		SET alert_notified_at = now(), updated_at = now()
-		WHERE id = $1 AND alert_notified_at IS NULL
-		RETURNING id
-	`, payload.IncidentID).Scan(&claimedID)
+	dedupKey := r.alertDedupKey(payload)
+	claimed, err := r.claimAlert(ctx, dedupKey)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return &models.AlertResponse{
-				IncidentID: payload.IncidentID,
-				Sent:       false,
-				Skipped:    true,
-				Reason:     "already_notified",
-				Message:    "immediate alert already sent for this incident",
-			}, nil
-		}
 		return nil, err
+	}
+	if !claimed {
+		return &models.AlertResponse{
+			IncidentID: payload.IncidentID,
+			Sent:       false,
+			Skipped:    true,
+			Reason:     "already_notified",
+			Message:    "immediate alert already sent for this condition",
+		}, nil
 	}
 
 	sent, firstErr := r.deliverAlert(ctx, payload.IncidentID, alertContent{
@@ -1557,8 +1559,8 @@ func (r *Reporter) SendAlert(ctx context.Context, payload models.AlertPayload) (
 	if !sent && firstErr != nil {
 		// Release the claim so a later re-fire can retry: an alert nobody
 		// received must not be recorded as delivered.
-		if _, relErr := r.db.ExecContext(ctx, `UPDATE incidents SET alert_notified_at = NULL WHERE id = $1`, payload.IncidentID); relErr != nil {
-			log.Error().Err(relErr).Str("incident_id", payload.IncidentID).Msg("Failed to release alert claim after delivery failure")
+		if relErr := r.releaseAlertClaim(ctx, dedupKey); relErr != nil {
+			log.Error().Err(relErr).Str("dedup_key", dedupKey).Msg("Failed to release alert claim after delivery failure")
 		}
 		return &models.AlertResponse{
 			IncidentID: payload.IncidentID,
@@ -1575,6 +1577,79 @@ func (r *Reporter) SendAlert(ctx context.Context, payload models.AlertPayload) (
 		Skipped:    false,
 		Message:    "alert sent",
 	}, nil
+}
+
+// alertDetails resolves the alert's display fields. An incident id wins when
+// present (it carries the canonical values); otherwise the event-sourced fields
+// on the payload are used, which is the normal immediate-alert path.
+func (r *Reporter) alertDetails(ctx context.Context, payload models.AlertPayload, wantResolved bool) (title, severity, environment string, startedAt time.Time, err error) {
+	if payload.IncidentID == "" {
+		startedAt, _ = time.Parse(time.RFC3339, payload.StartedAt)
+		return payload.Title, payload.Severity, payload.Environment, startedAt, nil
+	}
+
+	if wantResolved {
+		var resolvedAt sql.NullTime
+		err = r.db.QueryRowContext(ctx, `SELECT title, severity, environment, resolved_at, started_at FROM incidents WHERE id = $1`, payload.IncidentID).
+			Scan(&title, &severity, &environment, &resolvedAt, &startedAt)
+		if err == sql.ErrNoRows {
+			return "", "", "", time.Time{}, nil
+		}
+		return title, severity, environment, startedAt, err
+	}
+
+	err = r.db.QueryRowContext(ctx, `SELECT title, severity, environment, started_at FROM incidents WHERE id = $1`, payload.IncidentID).
+		Scan(&title, &severity, &environment, &startedAt)
+	if err == sql.ErrNoRows {
+		return "", "", "", time.Time{}, nil
+	}
+	return title, severity, environment, startedAt, err
+}
+
+// alertDedupKey identifies the alerting condition for one-shot claiming.
+func (r *Reporter) alertDedupKey(payload models.AlertPayload) string {
+	if payload.DedupKey != "" {
+		return payload.DedupKey
+	}
+	if payload.IncidentID != "" {
+		return "incident:" + payload.IncidentID
+	}
+	return "request:" + payload.RequestID
+}
+
+// claimAlert atomically records that this alert condition has been notified.
+// Returns false when the claim already exists. Uses idempotency_records so the
+// claim is race-safe without a dedicated table.
+func (r *Reporter) claimAlert(ctx context.Context, dedupKey string) (bool, error) {
+	sum := sha256.Sum256([]byte(dedupKey))
+	keyHash := hex.EncodeToString(sum[:])
+
+	var returned string
+	err := r.db.QueryRowContext(ctx, `
+		INSERT INTO idempotency_records (audience, caller, key_hash, request_hash, status, created_at, updated_at, expires_at)
+		VALUES ('reporter', 'ingest', $1, $1, 'completed', now(), now(), now() + interval '7 days')
+		ON CONFLICT (audience, caller, key_hash) DO NOTHING
+		RETURNING key_hash
+	`, keyHash).Scan(&returned)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// releaseAlertClaim removes the claim so a subsequent firing alerts again.
+// Called when an alert resolves, and when delivery failed entirely.
+func (r *Reporter) releaseAlertClaim(ctx context.Context, dedupKey string) error {
+	sum := sha256.Sum256([]byte(dedupKey))
+	keyHash := hex.EncodeToString(sum[:])
+	_, err := r.db.ExecContext(ctx, `
+		DELETE FROM idempotency_records
+		WHERE audience = 'reporter' AND caller = 'ingest' AND key_hash = $1
+	`, keyHash)
+	return err
 }
 
 // channelSender is one configured delivery channel.

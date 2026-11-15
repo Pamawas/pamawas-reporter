@@ -277,13 +277,29 @@ type ReportFeedback struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// AlertPayload represents a request to send an immediate high-severity alert
-// for a firing incident. Sent event-driven from ingest (like the resolve
-// notification); severity gating and the one-shot claim live on the reporter.
+// AlertPayload represents a request to send an immediate high-severity alert.
+//
+// Ingest fires this the moment it persists the event, so it carries the event's
+// own details rather than an incident id: the incident does not exist yet (the
+// correlator creates it on its own cycle), and an alert must not wait for that.
+// IncidentID is set only when a caller already knows it; when empty the alert
+// is rendered from these fields and deduplicated by DedupKey.
 type AlertPayload struct {
-	IncidentID      string `json:"incident_id"`
+	IncidentID      string `json:"incident_id,omitempty"`
 	RequestID       string `json:"request_id"`
 	ContractVersion int    `json:"contract_version"`
+
+	// Event-sourced alert details (used when IncidentID is empty).
+	Title       string `json:"title,omitempty"`
+	Severity    string `json:"severity,omitempty"`
+	Environment string `json:"environment,omitempty"`
+	Services    string `json:"services,omitempty"`
+	StartedAt   string `json:"started_at,omitempty"` // RFC3339
+
+	// DedupKey identifies the alerting condition across repeats (Grafana
+	// re-fires the same alert every evaluation interval). Required when
+	// IncidentID is empty.
+	DedupKey string `json:"dedup_key,omitempty"`
 }
 
 // AlertResponse represents the response from the alerts endpoint.
