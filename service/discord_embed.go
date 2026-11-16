@@ -35,7 +35,6 @@ const (
 	discordMaxFieldName   = 256
 	discordMaxFieldValue  = 1024
 	discordMaxFooter      = 2048
-	discordMaxThreadName  = 100
 )
 
 // Discord embed colors (colored bar down the left edge).
@@ -71,26 +70,9 @@ type discordEmbed struct {
 }
 
 // discordMessage is the webhook payload.
-// discordDelivery is a rendered report ready to send.
-//
-// Channel and thread are separated because they are read differently: the
-// channel gets one message a reader can scan, and the supporting detail goes
-// into a thread so it is available without pushing everything else off screen.
-type discordDelivery struct {
-	// Channel is the message posted to the channel.
-	Channel *discordMessage
-	// ThreadEmbeds are posted into the thread the Channel message creates.
-	// Empty when the report fits in one message.
-	ThreadEmbeds []discordEmbed
-}
-
 type discordMessage struct {
-	Username string `json:"username"`
+	Username string         `json:"username"`
 	Embeds   []discordEmbed `json:"embeds"`
-	// ThreadName creates a thread from this message and posts it there.
-	// Discord reads it from the create payload only, so it is never sent for
-	// follow-up posts into an existing thread.
-	ThreadName string `json:"thread_name,omitempty"`
 }
 
 // buildDiscordMessage renders a report as Discord embeds.
@@ -103,7 +85,7 @@ type discordMessage struct {
 //   - single incident: ONE card with the triage order (cause, actions,
 //     evidence), because it is read by whoever is on call right now.
 //   - multi-incident immediate: a summary card plus one card per incident.
-func (r *Reporter) buildDiscordMessage(ctx context.Context, report models.Report) (*discordDelivery, error) {
+func (r *Reporter) buildDiscordMessage(ctx context.Context, report models.Report) (*discordMessage, error) {
 	incidents, inclusionReasons, err := r.loadReportIncidents(ctx, report.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load report incidents: %w", err)
@@ -124,12 +106,12 @@ func (r *Reporter) buildDiscordMessage(ctx context.Context, report models.Report
 
 	if len(incidents) == 1 {
 		inc := incidents[0]
-		return &discordDelivery{Channel: &discordMessage{
+		return &discordMessage{
 			Username: "Pamawas Reporter",
 			Embeds: []discordEmbed{
 				r.buildSingleIncidentEmbed(report, inc, evidence[inc.ID], inclusionReasons[inc.ID]),
 			},
-		}}, nil
+		}, nil
 	}
 
 	embeds := []discordEmbed{r.buildSummaryEmbed(ctx, report, incidents)}
@@ -144,68 +126,27 @@ func (r *Reporter) buildDiscordMessage(ctx context.Context, report models.Report
 		embeds = append(embeds, buildIncidentEmbed(report, inc, evidence[inc.ID], inclusionReasons[inc.ID]))
 	}
 
-	return &discordDelivery{Channel: &discordMessage{Username: "Pamawas Reporter", Embeds: embeds}}, nil
+	return &discordMessage{Username: "Pamawas Reporter", Embeds: embeds}, nil
 }
 
-// buildDailyDigestMessage renders the daily report as a morning digest.
+// buildDailyDigestMessage renders the daily report as ONE morning digest card.
 //
-// A daily report is read on a phone before coffee, and it was previously
-// emitted as a summary card plus a full card per incident, each carrying the
-// complete investigation transcript. Five incidents became six cards of
-// scrolling in which the single incident still open was buried among four that
-// had already recovered on their own.
+// A daily report is read on a phone before coffee. It was previously emitted as
+// a summary card plus a full card per incident, each carrying the complete
+// investigation transcript; forty incidents became forty-odd cards of scrolling
+// in which the one incident still open was impossible to find.
 //
-// The digest answers the three questions a reader actually has, in order:
-// what is still broken, what recovered, and what happened overall. Investigation
-// detail is included only for incidents that still need attention, because a
-// recovered incident's transcript is history nobody acts on at 8am.
-func (r *Reporter) buildDailyDigestMessage(ctx context.Context, report models.Report, incidents []models.Incident) (*discordDelivery, error) {
+// The digest answers the three questions a reader actually has, in order: what
+// is still broken, what recovered, and what happened overall. It is deliberately
+// a single message: webhooks cannot create threads (thread_name only works in
+// forum channels), so anything posted as "detail" would land in the channel and
+// recreate the wall of text.
+func (r *Reporter) buildDailyDigestMessage(ctx context.Context, report models.Report, incidents []models.Incident) (*discordMessage, error) {
 	open, recovered := splitByStatus(incidents)
 
-	digest := r.buildDailyDigestEmbed(ctx, report, incidents, open, recovered)
-
-	// Per-incident detail for everything, in a thread. Recovered incidents get
-	// a detail card too — the morning reader may still want the transcript —
-	// but it must not occupy the channel to say so.
-	if len(incidents) == 0 {
-		return &discordDelivery{Channel: &discordMessage{
-			Username: "Pamawas Reporter",
-			Embeds:   []discordEmbed{digest},
-		}}, nil
-	}
-
-	ids := make([]string, 0, len(incidents))
-	for _, inc := range incidents {
-		ids = append(ids, inc.ID)
-	}
-	evidence, err := r.loadEvidenceForIncidents(ctx, ids)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load evidence: %w", err)
-	}
-
-	// Needs-attention incidents come first in the thread, then the recovered.
-	ordered := append(append([]models.Incident{}, open...), recovered...)
-	details := make([]discordEmbed, 0, len(ordered))
-	for _, inc := range ordered {
-		if len(details) >= discordMaxEmbeds {
-			log.Warn().
-				Str("report_id", report.ID).
-				Int("omitted", len(ordered)-len(details)).
-				Msg("Discord embed limit reached; remaining incidents omitted from the thread")
-			break
-		}
-		details = append(details, buildIncidentEmbed(report, inc, evidence[inc.ID], ""))
-	}
-
-	return &discordDelivery{
-		Channel: &discordMessage{
-			Username: "Pamawas Reporter",
-			Embeds:   []discordEmbed{digest},
-			ThreadName: truncateRunes(
-				fmt.Sprintf("Details · %s", report.PeriodEnd.Format("2006-01-02")),
-				discordMaxThreadName),
-		},
-		ThreadEmbeds: details,
+	return &discordMessage{
+		Username: "Pamawas Reporter",
+		Embeds:   []discordEmbed{r.buildDailyDigestEmbed(ctx, report, incidents, open, recovered)},
 	}, nil
 }
 
@@ -232,8 +173,12 @@ func (r *Reporter) buildDailyDigestEmbed(ctx context.Context, report models.Repo
 	fmt.Fprintf(&sb, "%s\n**%d incident(s)** · **%d** still open · **%d** recovered\n",
 		availabilityLine, len(incidents), len(open), len(recovered))
 
-	digestSection(&sb, "🔴 Needs attention", open, digestOpenLine)
-	digestSection(&sb, "✅ Recovered", recovered, digestRecoveredLine)
+	// Needs-attention incidents are listed individually: each one is a thing
+	// someone must decide about today. Recovered ones are grouped by condition,
+	// because "Monitoring Target Down ×12" is what a reader needs from history,
+	// not twelve identical lines.
+	digestOpenSection(&sb, open)
+	digestRecoveredSection(&sb, recovered)
 
 	if len(incidents) == 0 {
 		sb.WriteString("\nNothing to report.")
@@ -254,39 +199,119 @@ func (r *Reporter) buildDailyDigestEmbed(ctx context.Context, report models.Repo
 	}
 }
 
-// digestSection writes a titled list of one-line incident summaries.
-func digestSection(sb *strings.Builder, heading string, incidents []models.Incident, line func(models.Incident) string) {
-	if len(incidents) == 0 {
+// digestOpenSection writes incidents that still need attention, grouped by
+// condition.
+//
+// Correlation can open several incidents for one condition (the same target
+// flapping), and listing each one separately produced ten identical lines in a
+// real report. Grouping shows the reader that it is one problem, how many times
+// it reopened, and how long the earliest instance has been open — which is the
+// number that matters.
+func digestOpenSection(sb *strings.Builder, open []models.Incident) {
+	if len(open) == 0 {
 		return
 	}
-	fmt.Fprintf(sb, "\n**%s**\n", heading)
-	for _, inc := range incidents {
-		// Leave room for the truncation notice rather than cutting mid-line.
+
+	type group struct {
+		title    string
+		severity string
+		affected []string
+		count    int
+		earliest time.Time
+	}
+	var order []string
+	groups := make(map[string]*group)
+
+	for _, inc := range open {
+		key := inc.Title + "\x00" + affectedLabel(inc)
+		g, ok := groups[key]
+		if !ok {
+			g = &group{title: inc.Title, severity: inc.Severity,
+				affected: inc.AffectedServices, earliest: inc.StartedAt}
+			groups[key] = g
+			order = append(order, key)
+		}
+		g.count++
+		if inc.StartedAt.Before(g.earliest) {
+			g.earliest = inc.StartedAt
+		}
+	}
+
+	fmt.Fprintf(sb, "\n**🔴 Needs attention**\n")
+	for i, key := range order {
+		g := groups[key]
 		if sb.Len() > discordMaxDescription-120 {
-			fmt.Fprintf(sb, "• _… and %d more_\n", len(incidents)-1)
+			fmt.Fprintf(sb, "• _… and %d more conditions_\n", len(order)-i)
 			return
 		}
-		sb.WriteString(line(inc))
+
+		line := fmt.Sprintf("• %s **%s**", severityColor(g.severity), g.title)
+		if affected := strings.Join(g.affected, ", "); affected != "" {
+			line += " · " + affected
+		}
+		fmt.Fprintf(sb, "%s · open since %s", line, g.earliest.UTC().Format("15:04 UTC"))
+		if g.count > 1 {
+			fmt.Fprintf(sb, " (×%d, reopened)", g.count)
+		}
+		sb.WriteString("\n")
 	}
 }
 
-// digestOpenLine summarises an incident that still needs attention.
-func digestOpenLine(inc models.Incident) string {
-	return fmt.Sprintf("• %s **%s** · %s · open since %s\n",
-		severityColor(inc.Severity), inc.Title, affectedLabel(inc),
-		inc.StartedAt.UTC().Format("15:04 UTC"))
-}
-
-// digestRecoveredLine summarises an incident that recovered, including how long
-// it was out. Findings are deliberately omitted: a recovered incident needs a
-// duration, not a transcript.
-func digestRecoveredLine(inc models.Incident) string {
-	duration := ""
-	if !inc.ResolvedAt.IsZero() {
-		duration = " · " + inc.ResolvedAt.Sub(inc.StartedAt).Round(time.Second).String()
+// digestRecoveredSection writes recovered incidents grouped by condition.
+//
+// A busy night produces the same alert repeatedly; listing every occurrence
+// buries the one that still needs attention and tells the reader nothing beyond
+// the count. Grouping keeps the card scannable and surfaces the pattern.
+func digestRecoveredSection(sb *strings.Builder, recovered []models.Incident) {
+	if len(recovered) == 0 {
+		return
 	}
-	return fmt.Sprintf("• %s **%s** · %s%s\n",
-		severityColor(inc.Severity), inc.Title, affectedLabel(inc), duration)
+
+	type group struct {
+		title    string
+		severity string
+		affected []string
+		count    int
+		total    time.Duration
+	}
+	var order []string
+	groups := make(map[string]*group)
+
+	for _, inc := range recovered {
+		// Identity is the condition, not the occurrence.
+		key := inc.Title + "\x00" + affectedLabel(inc)
+		g, ok := groups[key]
+		if !ok {
+			g = &group{title: inc.Title, severity: inc.Severity, affected: inc.AffectedServices}
+			groups[key] = g
+			order = append(order, key)
+		}
+		g.count++
+		g.total += inc.ResolvedAt.Sub(inc.StartedAt)
+	}
+
+	fmt.Fprintf(sb, "\n**✅ Recovered**\n")
+	for i, key := range order {
+		g := groups[key]
+		if sb.Len() > discordMaxDescription-120 {
+			fmt.Fprintf(sb, "• _… and %d more conditions_\n", len(order)-i)
+			return
+		}
+
+		line := fmt.Sprintf("• %s **%s** · %s", severityColor(g.severity), g.title,
+			strings.Join(g.affected, ", "))
+		if len(g.affected) == 0 {
+			line = fmt.Sprintf("• %s **%s**", severityColor(g.severity), g.title)
+		}
+		if g.count > 1 {
+			// Average is the honest figure: one long outage and several short
+			// ones are not the same story, and a total would hide that.
+			avg := (g.total / time.Duration(g.count)).Round(time.Second)
+			fmt.Fprintf(sb, "%s ×%d · ~%s each\n", line, g.count, avg)
+		} else {
+			fmt.Fprintf(sb, "%s · %s\n", line, g.total.Round(time.Second))
+		}
+	}
 }
 
 // splitByStatus partitions incidents into those still needing attention and

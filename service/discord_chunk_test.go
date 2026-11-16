@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,15 +20,16 @@ import (
 // summary card plus one bordered card per incident. Discord's proportional
 // font makes ASCII text boxes impossible to align, so the box comes from an
 // embed (colored left bar) instead of the text template.
-func TestDailyReportSendsDigestAndThreadedDetail(t *testing.T) {
+//
+// A daily report is ONE message. Webhooks cannot create threads, so anything
+// split off as "detail" would land in the channel and recreate the wall of
+// text the digest exists to avoid.
+func TestDailyReportIsOneDigestMessage(t *testing.T) {
 	var payloads []map[string]interface{}
-	var paths []string
 	capture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]interface{}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		payloads = append(payloads, body)
-		paths = append(paths, r.URL.String())
-		// wait=true (used for the channel message) gets the created message back.
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"id":"msg_123"}`))
 	}))
@@ -34,13 +37,8 @@ func TestDailyReportSendsDigestAndThreadedDetail(t *testing.T) {
 
 	incidentID := "inc_abc123"
 	report := models.Report{
-		ID:              "test-id",
-		Content:         "plain text content that must NOT be sent as content",
-		ReportType:      "daily",
-		Timezone:        "UTC",
-		TemplateVersion: "pamawas-report-v2",
-		GeneratedAt:     time.Now(),
-		PeriodEnd:       time.Now(),
+		ID: "test-id", ReportType: "daily", Timezone: "UTC",
+		TemplateVersion: "pamawas-report-v2", GeneratedAt: time.Now(), PeriodEnd: time.Now(),
 	}
 
 	r, mock := newMockReporter(t, ReporterConfig{DiscordWebhookURL: capture.URL})
@@ -48,52 +46,56 @@ func TestDailyReportSendsDigestAndThreadedDetail(t *testing.T) {
 		WithArgs("test-id").
 		WillReturnRows(sqlmock.NewRows([]string{"incident_id", "inclusion_reason"}).
 			AddRow(incidentID, models.InclusionReasonNewlyStarted))
-	// getIncidentsByIDs selects exactly these 10 columns.
 	mock.ExpectQuery("SELECT id, title, status, started_at, resolved_at, severity, environment").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "title", "status", "started_at", "resolved_at",
 			"severity", "environment", "affected_services",
 			"correlation_policy", "correlation_version",
 		}).AddRow(incidentID, "Monitoring Target Down", "open", time.Now(),
-			nil, "critical", "production", "{last-labs}",
-			"service_time_window", 1))
-	mock.ExpectQuery("FROM evidence e").
-		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "incident_id", "type", "content", "source", "source_detail",
-			"confidence", "supports_evidence", "contradicts_evidence", "ordinal",
-		}).AddRow("evd_1", incidentID, "fact", "CPU load spiked to 17",
-			"prometheus", "node_load1", 0.95, "{}", "{}", 0))
+			nil, "critical", "production", "{last-labs}", "service_time_window", 1))
 
 	if err := r.sendToDiscord(context.Background(), report); err != nil {
 		t.Fatalf("sendToDiscord failed: %v", err)
 	}
 
-	require.Len(t, payloads, 2, "expected a channel message and one thread post")
+	require.Len(t, payloads, 1, "a daily report is exactly one message")
+	// thread_name is rejected with 400 by non-forum channels; it must never
+	// be sent.
+	require.NotContains(t, payloads[0], "thread_name")
 
-	// The channel message is the digest: one card a reader can scan.
-	channel, ok := payloads[0]["embeds"].([]interface{})
-	require.True(t, ok, "channel payload must contain embeds")
-	require.Len(t, channel, 1, "the channel gets exactly one digest card")
-	digest, _ := channel[0].(map[string]interface{})
+	embeds, ok := payloads[0]["embeds"].([]interface{})
+	require.True(t, ok, "payload must contain embeds")
+	require.Len(t, embeds, 1, "the channel gets exactly one digest card")
+	digest, _ := embeds[0].(map[string]interface{})
 	require.Contains(t, digest["title"], "Daily Report")
 	desc, _ := digest["description"].(string)
 	require.Contains(t, desc, "Needs attention")
 	require.Contains(t, desc, "Monitoring Target Down")
-	// A digest states counts, not per-incident transcripts.
-	require.NotContains(t, desc, "CPU load spiked to 17")
-	require.NotEmpty(t, payloads[0]["thread_name"], "the digest creates a thread for detail")
-	_, hasContent := payloads[0]["content"]
-	require.False(t, hasContent, "reports must not be sent as plain content")
+}
 
-	// The detail goes into that thread, so the channel stays scannable.
-	require.Contains(t, paths[1], "thread_id=msg_123")
-	thread, ok := payloads[1]["embeds"].([]interface{})
-	require.True(t, ok, "thread payload must contain embeds")
-	require.Len(t, thread, 1)
-	detail, _ := thread[0].(map[string]interface{})
-	require.Contains(t, detail["title"], "Monitoring Target Down")
-	detailDesc, _ := detail["description"].(string)
-	require.Contains(t, detailDesc, "CPU load spiked to 17")
+// TestDailyDigestGroupsRecoveredConditions verifies a busy night stays
+// scannable: repeated occurrences of one condition collapse to a single line
+// with a count, rather than one line each.
+func TestDailyDigestGroupsRecoveredConditions(t *testing.T) {
+	base := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+	var recovered []models.Incident
+	for i := 0; i < 12; i++ {
+		started := base.Add(time.Duration(i) * 10 * time.Minute)
+		recovered = append(recovered, models.Incident{
+			ID: fmt.Sprintf("inc_%d", i), Title: "Monitoring Target Down", Status: "resolved",
+			Severity: "critical", AffectedServices: []string{"last-labs"},
+			StartedAt: started, ResolvedAt: started.Add(5 * time.Minute),
+		})
+	}
+
+	var sb strings.Builder
+	digestRecoveredSection(&sb, recovered)
+	out := sb.String()
+
+	require.Contains(t, out, "×12", "repeated occurrences must collapse to a count")
+	require.Contains(t, out, "~5m0s each")
+	require.Equal(t, 1, strings.Count(out, "Monitoring Target Down"),
+		"the condition must appear once, not once per occurrence")
 }
 
 // TestHighSeverityReportIsOneTriageCard verifies the immediate-report path is
@@ -179,4 +181,28 @@ func TestSendToDiscordRateLimitRetry(t *testing.T) {
 	err := r.sendDiscordChunkWithRetry(context.Background(), 0, []byte(`{"embeds":[]}`))
 	require.Nil(t, err, "sendDiscordChunkWithRetry should succeed after rate-limit retry")
 	require.GreaterOrEqual(t, attempts, 2, "expected at least 2 attempts (initial + retry)")
+}
+
+// TestDailyDigestGroupsOpenConditions verifies the needs-attention list stays
+// readable when correlation opens several incidents for one flapping condition.
+// A real report had ten identical "Monitoring Target Down · last-labs" lines.
+func TestDailyDigestGroupsOpenConditions(t *testing.T) {
+	base := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+	var open []models.Incident
+	for i := 0; i < 10; i++ {
+		open = append(open, models.Incident{
+			ID: fmt.Sprintf("inc_%d", i), Title: "Monitoring Target Down", Status: "open",
+			Severity: "critical", AffectedServices: []string{"last-labs"},
+			StartedAt: base.Add(-time.Hour),
+		})
+	}
+
+	var sb strings.Builder
+	digestOpenSection(&sb, open)
+	out := sb.String()
+
+	require.Contains(t, out, "(×10, reopened)")
+	require.Equal(t, 1, strings.Count(out, "Monitoring Target Down"),
+		"the condition must appear once, not once per incident")
+	require.Contains(t, out, "open since")
 }

@@ -73,7 +73,11 @@ func (r *Reporter) summarizeDay(ctx context.Context, report models.Report, incid
 		req.Header.Set("X-Service-Token", r.config.ServiceToken)
 	}
 
-	resp, err := r.httpClient.Do(req)
+	// A dedicated client: the shared httpClient has a 10s timeout, which
+	// silently overrode SummaryTimeout and made every summary fail at ~10s
+	// even when the budget was 20s.
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Warn().Err(err).Msg("Daily summary request failed; digest continues without it")
 		return ""

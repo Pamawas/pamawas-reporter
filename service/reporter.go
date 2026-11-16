@@ -1237,94 +1237,36 @@ func (r *Reporter) classifyError(err error) string {
 	}
 }
 
-// sendToDiscord sends the report to Discord as embeds: a summary card followed
-// by one bordered card per incident. Discord's proportional font makes text
-// boxes impossible to align, so the bordered card comes from embeds (colored
-// left bar + boxed body) rather than the text template.
-// sendToDiscord delivers a report to Discord.
+// sendToDiscord delivers a report to Discord as embeds. Discord's proportional
+// font makes text boxes impossible to align, so the bordered card comes from
+// embeds (colored left bar + boxed body) rather than the text template.
 //
-// The channel gets the report's main message. Supporting detail is posted into
-// the thread that message created, so a reader scanning the channel sees one
-// card per report instead of a wall of incident transcripts, while the detail
-// stays one click away.
+// A report is one message. Webhooks cannot create threads — thread_name only
+// works in forum channels — so anything split off as "detail" would land in the
+// channel and recreate the wall of text the digest exists to avoid.
 func (r *Reporter) sendToDiscord(ctx context.Context, report models.Report) error {
 	if r.config.DiscordWebhookURL == "" {
 		return nil
 	}
 
-	delivery, err := r.buildDiscordMessage(ctx, report)
+	message, err := r.buildDiscordMessage(ctx, report)
 	if err != nil {
 		return fmt.Errorf("failed to render Discord embeds: %w", err)
 	}
 
-	channelBytes, err := json.Marshal(delivery.Channel)
+	payloadBytes, err := json.Marshal(message)
 	if err != nil {
 		return fmt.Errorf("failed to marshal Discord payload: %w", err)
 	}
 
-	// wait=true makes Discord return the created message, which is where the
-	// thread id comes from. Discord seeds the thread from this message when
-	// thread_name is set, and the message id is the thread id.
-	body, postErr := r.postDiscord(ctx, channelBytes, url.Values{"wait": {"true"}})
-	if postErr != nil {
-		return postErr
-	}
-
-	if len(delivery.ThreadEmbeds) == 0 {
-		return nil
-	}
-
-	var created struct {
-		ID string `json:"id"`
-	}
-	threadID := ""
-	if err := json.Unmarshal(body, &created); err != nil || created.ID == "" {
-		// Without a thread id the detail cannot be threaded, but it must still
-		// be delivered: post it to the channel rather than losing it.
-		log.Warn().Err(err).Str("report_id", report.ID).
-			Msg("Discord returned no message id; posting report detail to the channel")
-	}
-	threadID = created.ID
-
-	return r.postDiscordEmbeds(ctx, delivery.ThreadEmbeds, threadID)
-}
-
-// postDiscordEmbeds sends embeds in batches, into the given thread when threadID
-// is set and to the channel otherwise.
-func (r *Reporter) postDiscordEmbeds(ctx context.Context, embeds []discordEmbed, threadID string) error {
-	for start := 0; start < len(embeds); start += discordMaxEmbeds {
-		end := min(start+discordMaxEmbeds, len(embeds))
-		payload := discordMessage{
-			Username: "Pamawas Reporter",
-			Embeds:   embeds[start:end],
-		}
-		payloadBytes, err := json.Marshal(payload)
-		if err != nil {
-			return fmt.Errorf("failed to marshal Discord detail payload: %w", err)
-		}
-
-		var params url.Values
-		if threadID != "" {
-			params = url.Values{"thread_id": {threadID}}
-		}
-		if _, err := r.postDiscord(ctx, payloadBytes, params); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err = r.postDiscord(ctx, payloadBytes)
+	return err
 }
 
 // postDiscord POSTs a payload to the webhook and returns the response body.
 // Retries transient failures and honours Discord's 429 retry_after.
-func (r *Reporter) postDiscord(ctx context.Context, payloadBytes []byte, params url.Values) ([]byte, error) {
+func (r *Reporter) postDiscord(ctx context.Context, payloadBytes []byte) ([]byte, error) {
 	endpoint := r.config.DiscordWebhookURL
-	if len(params) > 0 {
-		sep := "?"
-		if strings.Contains(endpoint, "?") {
-			sep = "&"
-		}
-		endpoint += sep + params.Encode()
-	}
 
 	const maxRetries = 3
 	const baseRetryDelay = 2 * time.Second
@@ -1378,7 +1320,9 @@ func (r *Reporter) postDiscord(ctx context.Context, payloadBytes []byte, params 
 			continue
 		}
 
-		err = fmt.Errorf("discord webhook returned status %d", resp.StatusCode)
+		// Log Discord's own error body. A bare "status 400" told us nothing
+		// when a thread_name field was rejected for a non-forum channel.
+		err = fmt.Errorf("discord webhook returned status %d: %s", resp.StatusCode, truncateRunes(string(respBody), 300))
 		log.Error().Err(err).Int("attempt", attempt+1).Msg("Discord webhook error")
 		return nil, err
 	}
