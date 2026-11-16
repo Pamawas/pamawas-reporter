@@ -185,7 +185,7 @@ func (r *Reporter) buildDailyDigestEmbed(ctx context.Context, report models.Repo
 
 	var sb strings.Builder
 	if summary != "" {
-		sb.WriteString(summary)
+		sb.WriteString(plainTypography(summary))
 		sb.WriteString("\n\n")
 	}
 	fmt.Fprintf(&sb, "%s\n**%d incident(s)** · **%d** still open · **%d** recovered\n",
@@ -342,7 +342,7 @@ func writeDigestTriageLines(sb *strings.Builder, evList []models.Evidence) {
 // clipSentence shortens text to at most limit runes, cutting at a word
 // boundary so the result does not end mid-token.
 func clipSentence(s string, limit int) string {
-	flat := strings.Join(strings.Fields(s), " ")
+	flat := plainTypography(strings.Join(strings.Fields(s), " "))
 	if len([]rune(flat)) <= limit {
 		return escapeDiscordMarkdown(flat)
 	}
@@ -352,6 +352,34 @@ func clipSentence(s string, limit int) string {
 		cut = cut[:idx]
 	}
 	return escapeDiscordMarkdown(strings.TrimRight(cut, " ,.;:")) + "…"
+}
+
+// plainTypography replaces em and en dashes with plain punctuation.
+//
+// The investigator is asked not to use them and normalizes its own findings,
+// but this is the last place before text reaches a reader, and it also covers
+// findings stored before that rule existed. An em dash in a proportional font
+// reads as a stray line and is the clearest generated-prose tell there is.
+func plainTypography(s string) string {
+	if !strings.ContainsAny(s, "—–―") {
+		return s
+	}
+	r := strings.NewReplacer(
+		" — ", ", ",
+		"— ", ", ",
+		" —", ",",
+		"—", ",",
+		" – ", ", ",
+		"– ", ", ",
+		" –", ",",
+		"–", ",",
+		"―", ",",
+	)
+	out := strings.Join(strings.Fields(r.Replace(s)), " ")
+	for strings.Contains(out, ",,") {
+		out = strings.ReplaceAll(out, ",,", ",")
+	}
+	return out
 }
 
 // digestRecoveredSection writes recovered incidents grouped by condition.

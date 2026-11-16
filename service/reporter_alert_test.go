@@ -795,3 +795,24 @@ func TestFormatElapsedReadsLikeATriageClock(t *testing.T) {
 		}
 	}
 }
+
+// TestEmDashesNeverReachACard keeps generated prose from looking generated.
+//
+// The hypothesis badge used to read "confidence — not confirmed", and incident
+// text from the investigator used em dashes throughout. They render as a stray
+// line in a proportional font and are the clearest tell that a machine wrote
+// the card.
+func TestEmDashesNeverReachACard(t *testing.T) {
+	got := clipSentence("Possible cause — not confirmed", 200)
+	if strings.ContainsAny(got, "—–") {
+		t.Fatalf("clipSentence kept a dash: %q", got)
+	}
+	if got != "Possible cause, not confirmed" {
+		t.Errorf("clipSentence = %q", got)
+	}
+
+	// A run of dashes must not leave a comma pile behind.
+	if got := plainTypography("a — — b"); strings.Contains(got, ",,") {
+		t.Errorf("plainTypography left doubled commas: %q", got)
+	}
+}

@@ -9,9 +9,9 @@ import (
 type CircuitState string
 
 const (
-	CircuitStateClosed     CircuitState = "closed"
-	CircuitStateOpen       CircuitState = "open"
-	CircuitStateHalfOpen   CircuitState = "half-open"
+	CircuitStateClosed   CircuitState = "closed"
+	CircuitStateOpen     CircuitState = "open"
+	CircuitStateHalfOpen CircuitState = "half-open"
 )
 
 // CircuitBreaker is a simple failure-threshold circuit breaker.
@@ -34,9 +34,9 @@ type CircuitBreaker struct {
 // allowing a single trial call.
 func NewCircuitBreaker(maxFailures int, timeout time.Duration) *CircuitBreaker {
 	return &CircuitBreaker{
-		state:      CircuitStateClosed,
+		state:       CircuitStateClosed,
 		maxFailures: maxFailures,
-		timeout:    timeout,
+		timeout:     timeout,
 	}
 }
 
@@ -101,8 +101,8 @@ func (cb *CircuitBreaker) Failures() int {
 
 // StateSnapshot returns a snapshot of the circuit breaker state for observability.
 type StateSnapshot struct {
-	State   CircuitState `json:"state"`
-	Failures int         `json:"failures"`
+	State    CircuitState `json:"state"`
+	Failures int          `json:"failures"`
 }
 
 // Snapshot returns a copy of the current state for observability.

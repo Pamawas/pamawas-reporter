@@ -109,9 +109,9 @@ func (r *Reporter) summarizeDay(ctx context.Context, report models.Report, incid
 // structured facts only — no transcripts — so the summary cannot drift into
 // inventing detail that was never observed.
 type dailySummaryRequest struct {
-	PeriodStart string                `json:"period_start"`
-	PeriodEnd   string                `json:"period_end"`
-	Timezone    string                `json:"timezone"`
+	PeriodStart string                 `json:"period_start"`
+	PeriodEnd   string                 `json:"period_end"`
+	Timezone    string                 `json:"timezone"`
 	Incidents   []dailySummaryIncident `json:"incidents"`
 }
 
