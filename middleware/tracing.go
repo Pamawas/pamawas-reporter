@@ -32,7 +32,7 @@ func TracingMiddleware(serviceName string, next http.Handler) http.Handler {
 	// silently drop the incoming trace context and start a second trace for
 	// every request. Resolve the propagator here from the trace context alone,
 	// which is what every internal caller sends.
-	propagator := tracingPropagator()
+	propagator := traceContextPropagator()
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Continue an existing trace when the caller supplied one.
@@ -61,29 +61,6 @@ func TracingMiddleware(serviceName string, next http.Handler) http.Handler {
 			span.SetStatus(codes.Error, http.StatusText(wrapped.statusCode))
 		}
 	})
-}
-
-// tracingPropagator returns the W3C trace-context propagator, falling back to a
-// local one when the global is unset.
-func tracingPropagator() propagation.TextMapPropagator {
-	if p := otel.GetTextMapPropagator(); p != nil {
-		if _, isNoop := p.(propagation.TextMapPropagator); isNoop {
-			// Any propagator satisfies the interface; the check below is the
-			// real one: does it extract anything from a known header?
-			if traceparentExtracted(p) {
-				return p
-			}
-		}
-	}
-	return propagation.TraceContext{}
-}
-
-// traceparentExtracted reports whether p reads a W3C traceparent header.
-func traceparentExtracted(p propagation.TextMapPropagator) bool {
-	const tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
-	carrier := propagation.MapCarrier{"traceparent": tp}
-	sc := trace.SpanContextFromContext(p.Extract(context.Background(), carrier))
-	return sc.IsValid()
 }
 
 // traceContextPropagator returns the propagator used to read and write trace
