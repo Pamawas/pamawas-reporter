@@ -44,6 +44,15 @@ const (
 const (
 	digestCauseLimit  = 180
 	digestActionLimit = 140
+
+	// Per-item limits on a single-incident card. Generous, because this card is
+	// the one place a reader expects detail — but bounded, because one runaway
+	// finding (a 6KB block of model working notes) would consume the whole
+	// 4096-character description and truncate every finding after it. The full
+	// text is never lost: it is served by /api/v1/incidents/{id}/findings.
+	cardCauseLimit    = 900
+	cardActionLimit   = 400
+	cardEvidenceLimit = 500
 )
 
 // Discord embed colors (colored bar down the left edge).
@@ -458,12 +467,12 @@ func (r *Reporter) buildSingleIncidentEmbed(report models.Report, inc models.Inc
 		} else {
 			sb.WriteString("\n**🎯 Likely cause**\n")
 		}
-		fmt.Fprintf(&sb, "%s%s\n", escapeDiscordMarkdown(cause.Content), evidenceSourceSuffix(*cause))
+		fmt.Fprintf(&sb, "%s%s\n", clipSentence(cause.Content, cardCauseLimit), evidenceSourceSuffix(*cause))
 	}
 	if len(actions) > 0 {
 		sb.WriteString("\n**🛠 Suggested actions**\n")
 		for i, rec := range actions {
-			fmt.Fprintf(&sb, "%d. %s\n", i+1, escapeDiscordMarkdown(rec.Content))
+			fmt.Fprintf(&sb, "%d. %s\n", i+1, clipSentence(rec.Content, cardActionLimit))
 		}
 	}
 	if len(evidence) > 0 {
@@ -471,7 +480,7 @@ func (r *Reporter) buildSingleIncidentEmbed(report models.Report, inc models.Inc
 		for _, ev := range evidence {
 			fmt.Fprintf(&sb, "%s **%s** (%.0f%%) %s%s\n",
 				evidenceIcon(ev.Type), strings.ToUpper(ev.Type), ev.Confidence*100,
-				escapeDiscordMarkdown(ev.Content), evidenceSourceSuffix(ev))
+				clipSentence(ev.Content, cardEvidenceLimit), evidenceSourceSuffix(ev))
 		}
 	}
 	if cause == nil && len(actions) == 0 && len(evidence) == 0 {
