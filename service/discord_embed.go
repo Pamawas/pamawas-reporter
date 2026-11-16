@@ -610,7 +610,7 @@ func buildIncidentEmbed(report models.Report, inc models.Incident, evList []mode
 	// HIGH_SEVERITY_THRESHOLD gate. The gate was working; the card just never
 	// said where it came from. Status stays in the Status field and the bar
 	// colour, so the title is free to carry provenance.
-	title := fmt.Sprintf("%s · %s", reportLabel(report), inc.Title)
+	title := fmt.Sprintf("%s · %s", reportLabel(report), escapeDiscordMarkdown(inc.Title))
 
 	// Only fields that carry information are shown. A field reading "unknown"
 	// looks like a fact the investigation established; the truth is that the
@@ -862,17 +862,20 @@ func (s alertSubject) fields() []discordEmbedField {
 		{Name: "Severity", Value: fmt.Sprintf("%s %s", severityColor(s.Severity), s.Severity), Inline: true},
 		{Name: "Environment", Value: orUnknown(s.Environment), Inline: true},
 	}
+	// Target, job and service values are machine identifiers — `docker_cadvisor`,
+	// `system_node` — so they need the same escaping as evidence text: Discord
+	// reads a bare underscore as an italic delimiter and drops it.
 	if s.Target != "" {
-		fields = append(fields, discordEmbedField{Name: "Target", Value: s.Target, Inline: true})
+		fields = append(fields, discordEmbedField{Name: "Target", Value: escapeDiscordMarkdown(s.Target), Inline: true})
 	}
 	if s.Job != "" {
-		fields = append(fields, discordEmbedField{Name: "Job", Value: s.Job, Inline: true})
+		fields = append(fields, discordEmbedField{Name: "Job", Value: escapeDiscordMarkdown(s.Job), Inline: true})
 	}
 	// Only show Services when it says something the target does not: sources
 	// that name no service leave it empty, and ingest derives it from the
 	// target otherwise, so repeating it would be noise.
 	if s.Services != "" && s.Services != s.Target {
-		fields = append(fields, discordEmbedField{Name: "Services", Value: s.Services, Inline: true})
+		fields = append(fields, discordEmbedField{Name: "Services", Value: escapeDiscordMarkdown(s.Services), Inline: true})
 	}
 	if !s.StartedAt.IsZero() {
 		fields = append(fields, discordEmbedField{
@@ -952,7 +955,7 @@ func buildAlertEmbed(subject alertSubject) discordEmbed {
 	}
 
 	return discordEmbed{
-		Title:       truncateRunes("🚨 "+subject.Title, discordMaxTitle),
+		Title:       truncateRunes("🚨 "+escapeDiscordMarkdown(subject.Title), discordMaxTitle),
 		Description: truncateRunes(description, discordMaxDescription),
 		Color:       severityEmbedColor(subject.Severity),
 		Fields:      fields,
@@ -1022,7 +1025,7 @@ func buildResolvedAlertEmbed(subject alertSubject, resolvedAt time.Time, inciden
 	fields = trimAlertFields(fields)
 
 	embed := discordEmbed{
-		Title:       truncateRunes("✅ "+subject.Title, discordMaxTitle),
+		Title:       truncateRunes("✅ "+escapeDiscordMarkdown(subject.Title), discordMaxTitle),
 		Description: truncateRunes(description, discordMaxDescription),
 		Color:       discordColorResolved,
 		Fields:      fields,

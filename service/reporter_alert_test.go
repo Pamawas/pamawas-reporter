@@ -265,7 +265,9 @@ func TestAlertNamesTheTargetNotTheSender(t *testing.T) {
 	if got["Target"] != "last-labs" {
 		t.Errorf("card must name the target, got %q (fields: %v)", got["Target"], got)
 	}
-	if got["Job"] != "docker_cadvisor" {
+	// Escaped: `docker_cadvisor` carries one underscore, which Discord reads as
+	// an italic delimiter and consumes.
+	if got["Job"] != `docker\_cadvisor` {
 		t.Errorf("card must name the scrape job, got %q", got["Job"])
 	}
 	if _, hasServices := got["Services"]; hasServices {
