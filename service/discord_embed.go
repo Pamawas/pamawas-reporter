@@ -298,10 +298,10 @@ func digestRecoveredSection(sb *strings.Builder, recovered []models.Incident) {
 			return
 		}
 
-		line := fmt.Sprintf("• %s **%s** · %s", severityColor(g.severity), g.title,
-			strings.Join(g.affected, ", "))
+		line := fmt.Sprintf("• %s **%s** · %s", severityColor(g.severity),
+			escapeDiscordMarkdown(g.title), escapeDiscordMarkdown(strings.Join(g.affected, ", ")))
 		if len(g.affected) == 0 {
-			line = fmt.Sprintf("• %s **%s**", severityColor(g.severity), g.title)
+			line = fmt.Sprintf("• %s **%s**", severityColor(g.severity), escapeDiscordMarkdown(g.title))
 		}
 		if g.count > 1 {
 			// Average is the honest figure: one long outage and several short
