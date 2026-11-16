@@ -463,7 +463,7 @@ func (r *Reporter) buildSingleIncidentEmbed(report models.Report, inc models.Inc
 		// cause" with no qualifier told a paged engineer the opposite of what
 		// the evidence supports.
 		if cause.Type == "hypothesis" {
-			fmt.Fprintf(&sb, "\n**💭 Possible cause** _(hypothesis, %.0f%% confidence — not confirmed)_\n", cause.Confidence*100)
+			fmt.Fprintf(&sb, "\n**💭 Possible cause** _(hypothesis, %.0f%% confidence, not confirmed)_\n", cause.Confidence*100)
 		} else {
 			sb.WriteString("\n**🎯 Likely cause**\n")
 		}
@@ -539,8 +539,8 @@ func (r *Reporter) incidentHeadline(inc models.Incident, report models.Report) s
 	var state string
 	if inc.ResolvedAt.IsZero() {
 		// "Still down" already carries the status, so the status word itself
-		// would read "Still down — open open". The badge keeps the colour cue.
-		state = fmt.Sprintf("%s Still down — %s so far",
+		// would read "Still down, open open". The badge keeps the colour cue.
+		state = fmt.Sprintf("%s Still down for %s",
 			statusColor(inc.Status), formatElapsed(report.GeneratedAt.Sub(inc.StartedAt)))
 	} else {
 		state = fmt.Sprintf("%s Recovered after %s",
@@ -1002,7 +1002,7 @@ func (s alertSubject) recurrenceLine() string {
 	if s.PriorOccurrences <= 0 {
 		return ""
 	}
-	return fmt.Sprintf("🔁 **%s occurrence** in the last 24h — this condition keeps recurring.",
+	return fmt.Sprintf("🔁 **%s occurrence** in the last 24h. This condition keeps recurring.",
 		ordinal(s.PriorOccurrences+1))
 }
 
