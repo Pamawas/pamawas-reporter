@@ -291,10 +291,13 @@ func TestFindingsCiteTheirSourceAndSeparateActions(t *testing.T) {
 
 	out := formatFindingsForEmbed(evList, discordMaxDescription)
 
-	if !strings.Contains(out, "Prometheus: node_load1{instance=\"koba-labs\"}") {
+	// Underscores are escaped: Discord treats a bare one as an italic
+	// delimiter, which deletes the character and italicises the rest of the
+	// line. `node_load1` reached the reader as "node" followed by italic "load1".
+	if !strings.Contains(out, `Prometheus: node\_load1{instance="koba-labs"}`) {
 		t.Errorf("metric finding must cite Prometheus and the query, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Loki: kubernetes_container_name=netbird-agent") {
+	if !strings.Contains(out, `Loki: kubernetes\_container\_name=netbird-agent`) {
 		t.Errorf("log finding must cite Loki and the stream, got:\n%s", out)
 	}
 	if !strings.Contains(out, "_[inferred]_") {
@@ -681,5 +684,112 @@ func TestHypothesisIsNotPresentedAsLikelyCause(t *testing.T) {
 	)
 	if !strings.Contains(factCard.Description, "Likely cause") {
 		t.Errorf("a likely_cause should keep its label:\n%s", factCard.Description)
+	}
+}
+
+// TestEvidenceUnderscoresAreEscaped pins the rendering bug a reader spotted in
+// a delivered card: "_[incident history: get_related_incidents(...)]" showed a
+// literal leading underscore, and "docker_cluster" arrived as "dockercluster".
+//
+// Discord uses a single underscore as its italic delimiter. In machine text —
+// metric names, LogQL selectors, tool names — every one of them silently
+// disappeared and toggled italics for the remainder of the line.
+func TestEvidenceUnderscoresAreEscaped(t *testing.T) {
+	ev := models.Evidence{
+		Type:         "fact",
+		Content:      "All targets on instance last-labs dropped to up=0",
+		Source:       "incidents",
+		SourceDetail: "get_related_incidents(service='last-labs', symptom_keywords=['Monitoring Target Down'])",
+		Confidence:   1.0,
+	}
+
+	out := formatFindingsForEmbed([]models.Evidence{ev}, discordMaxDescription)
+
+	if strings.Contains(out, "symptom_keywords") {
+		t.Errorf("an unescaped underscore survived and would be eaten by Discord:\n%s", out)
+	}
+	if !strings.Contains(out, `symptom\_keywords`) {
+		t.Errorf("underscore must be escaped:\n%s", out)
+	}
+	// The italic marker this package emits must survive so the suffix still
+	// renders as a citation rather than as literal punctuation.
+	if !strings.Contains(out, " _[incident history:") || !strings.HasSuffix(strings.TrimSpace(out), "]_") {
+		t.Errorf("source citation must keep its italic markers:\n%s", out)
+	}
+}
+
+// TestSingleIncidentCardLeadsWithWhatIsDown pins the reading order an on-call
+// engineer asked for: what is broken, then the findings.
+//
+// Discord renders the description above the embed's fields, so the incident
+// identity has to lead the description. Putting it in fields alone placed
+// "Affected: last-labs" below a paragraph of analysis.
+func TestSingleIncidentCardLeadsWithWhatIsDown(t *testing.T) {
+	started := time.Now().Add(-52 * time.Minute)
+	inc := models.Incident{
+		ID: "inc_1", Title: "Monitoring Target Down", Status: "open", Severity: "critical",
+		Environment: "production", AffectedServices: []string{"last-labs"}, StartedAt: started,
+	}
+	r := &Reporter{}
+
+	card := r.buildSingleIncidentEmbed(
+		models.Report{ReportType: "high_severity", Timezone: "UTC", GeneratedAt: time.Now()},
+		inc,
+		[]models.Evidence{{Type: "likely_cause", Content: "netbird tunnel dropped", Source: "llm", Confidence: 0.85}},
+		"newly_started",
+	)
+
+	lines := strings.Split(card.Description, "\n")
+	if len(lines) < 2 {
+		t.Fatalf("card description too short:\n%s", card.Description)
+	}
+	// First line: what and where.
+	if !strings.Contains(lines[0], "Monitoring Target Down") || !strings.Contains(lines[0], "last-labs") {
+		t.Errorf("first line must name what is down and where, got %q", lines[0])
+	}
+	if !strings.Contains(strings.ToUpper(lines[0]), "CRITICAL") {
+		t.Errorf("first line must state severity, got %q", lines[0])
+	}
+	// Second line: still down, and for how long.
+	if !strings.Contains(lines[1], "Still down") || !strings.Contains(lines[1], "52m") {
+		t.Errorf("second line must state that it is still down and for how long, got %q", lines[1])
+	}
+	// Findings follow.
+	headlineIdx := strings.Index(card.Description, "Monitoring Target Down")
+	causeIdx := strings.Index(card.Description, "Likely cause")
+	if causeIdx < headlineIdx {
+		t.Errorf("findings must come after the status headline:\n%s", card.Description)
+	}
+
+	// The duplicated status fields are gone; the operational extras remain.
+	for _, f := range card.Fields {
+		switch f.Name {
+		case "Status", "Severity", "Environment", "Affected":
+			t.Errorf("field %q duplicates the headline", f.Name)
+		}
+	}
+	names := make([]string, 0, len(card.Fields))
+	for _, f := range card.Fields {
+		names = append(names, f.Name)
+	}
+	if !strings.Contains(strings.Join(names, ","), "Incident ID") {
+		t.Errorf("incident ID must survive for follow-up, got %v", names)
+	}
+}
+
+func TestFormatElapsedReadsLikeATriageClock(t *testing.T) {
+	cases := map[time.Duration]string{
+		5 * time.Second:                "5s",
+		4*time.Minute + 12*time.Second: "4m12s",
+		52 * time.Minute:               "52m", // not "52m00s": a timer, not a duration
+		2*time.Hour + 5*time.Minute:    "2h05m",
+		3 * time.Hour:                  "3h",
+		26 * time.Hour:                 "1d2h",
+		-5 * time.Second:               "0s",
+	}
+	for in, want := range cases {
+		if got := formatElapsed(in); got != want {
+			t.Errorf("formatElapsed(%v) = %q, want %q", in, got, want)
+		}
 	}
 }

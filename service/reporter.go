@@ -561,9 +561,37 @@ func evidenceSourceSuffix(ev models.Evidence) string {
 		return ""
 	}
 	if ev.SourceDetail != "" {
-		return fmt.Sprintf(" _[%s: %s]_", label, ev.SourceDetail)
+		return fmt.Sprintf(" _[%s: %s]_", label, escapeDiscordMarkdown(ev.SourceDetail))
 	}
 	return fmt.Sprintf(" _[%s]_", label)
+}
+
+// escapeDiscordMarkdown neutralises characters Discord would otherwise treat as
+// formatting.
+//
+// Evidence is machine-generated text: metric names, LogQL selectors, tool
+// names. They are full of underscores — `docker_cluster`, `node_memory_...`,
+// `symptom_keywords` — and an underscore is Discord's italic delimiter. An
+// unescaped one silently deleted itself and toggled italics for the rest of the
+// line, so `docker_cluster` reached the reader as "dockercluster" and
+// `_[incident history: get_related_incidents(...)]` rendered with a visible
+// leading underscore because the italic span never closed.
+//
+// Escaping is applied to content, never to the markers this package emits, so
+// the italics and bold the card relies on still work.
+func escapeDiscordMarkdown(s string) string {
+	if s == "" {
+		return s
+	}
+	replacer := strings.NewReplacer(
+		`\`, `\\`,
+		`_`, `\_`,
+		`*`, `\*`,
+		`~`, `\~`,
+		"`", "\\`",
+		`|`, `\|`,
+	)
+	return replacer.Replace(s)
 }
 
 // evidenceSourceLabel maps a finding's source onto a display label.

@@ -245,9 +245,9 @@ func digestOpenSection(sb *strings.Builder, open []models.Incident) {
 			return
 		}
 
-		line := fmt.Sprintf("• %s **%s**", severityColor(g.severity), g.title)
+		line := fmt.Sprintf("• %s **%s**", severityColor(g.severity), escapeDiscordMarkdown(g.title))
 		if affected := strings.Join(g.affected, ", "); affected != "" {
-			line += " · " + affected
+			line += " · " + escapeDiscordMarkdown(affected)
 		}
 		fmt.Fprintf(sb, "%s · open since %s", line, g.earliest.UTC().Format("15:04 UTC"))
 		if g.count > 1 {
@@ -352,46 +352,131 @@ func (r *Reporter) buildSingleIncidentEmbed(report models.Report, inc models.Inc
 	cause, actions, evidence := triageFindings(evList)
 
 	var sb strings.Builder
+
+	// What is broken leads the card. A reader opening this was paged about a
+	// specific thing; making them read a paragraph of analysis before reaching
+	// "what, where, how long" inverts their question. Discord renders the
+	// description above the fields, so this has to be in the description —
+	// fields alone always appear below the findings.
+	sb.WriteString(r.incidentHeadline(inc, report))
+
 	if cause != nil {
 		// Say which kind of claim this is. A hypothesis is the investigator
 		// admitting it did not converge, and presenting that under "Likely
 		// cause" with no qualifier told a paged engineer the opposite of what
 		// the evidence supports.
 		if cause.Type == "hypothesis" {
-			fmt.Fprintf(&sb, "**🎯 Possible cause** _(hypothesis, %.0f%% confidence)_\n", cause.Confidence*100)
+			fmt.Fprintf(&sb, "\n**💭 Possible cause** _(hypothesis, %.0f%% confidence — not confirmed)_\n", cause.Confidence*100)
 		} else {
-			sb.WriteString("**🎯 Likely cause**\n")
+			sb.WriteString("\n**🎯 Likely cause**\n")
 		}
-		fmt.Fprintf(&sb, "%s%s\n", cause.Content, evidenceSourceSuffix(*cause))
+		fmt.Fprintf(&sb, "%s%s\n", escapeDiscordMarkdown(cause.Content), evidenceSourceSuffix(*cause))
 	}
 	if len(actions) > 0 {
-		if sb.Len() > 0 {
-			sb.WriteString("\n")
-		}
-		sb.WriteString("**🛠 Suggested actions**\n")
+		sb.WriteString("\n**🛠 Suggested actions**\n")
 		for i, rec := range actions {
-			fmt.Fprintf(&sb, "%d. %s\n", i+1, rec.Content)
+			fmt.Fprintf(&sb, "%d. %s\n", i+1, escapeDiscordMarkdown(rec.Content))
 		}
 	}
 	if len(evidence) > 0 {
-		if sb.Len() > 0 {
-			sb.WriteString("\n")
-		}
-		sb.WriteString("**📋 Supporting evidence**\n")
+		sb.WriteString("\n**📋 Supporting evidence**\n")
 		for _, ev := range evidence {
 			fmt.Fprintf(&sb, "%s **%s** (%.0f%%) %s%s\n",
 				evidenceIcon(ev.Type), strings.ToUpper(ev.Type), ev.Confidence*100,
-				ev.Content, evidenceSourceSuffix(ev))
+				escapeDiscordMarkdown(ev.Content), evidenceSourceSuffix(ev))
 		}
 	}
-	if sb.Len() == 0 {
+	if cause == nil && len(actions) == 0 && len(evidence) == 0 {
 		sb.WriteString("_🔍 Investigation unavailable_")
 	}
 
 	embed.Description = truncateRunes(sb.String(), discordMaxDescription)
+	// The headline above already states what is affected, how severe it is and
+	// how long it has been down, so those fields would repeat it in a second
+	// block below the findings. Keep only what the headline cannot carry:
+	// exact timestamps and the incident ID someone will paste into a search.
+	embed.Fields = onlyFields(embed.Fields, "Started", "Resolved", "Downtime", "Incident ID")
 	embed.Footer = reportFooter(report)
 	embed.Timestamp = report.GeneratedAt.UTC().Format(time.RFC3339)
 	return embed
+}
+
+// onlyFields keeps the named fields, preserving their original order and
+// skipping any that are absent.
+func onlyFields(fields []discordEmbedField, keep ...string) []discordEmbedField {
+	if len(fields) == 0 {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(keep))
+	for _, name := range keep {
+		allowed[name] = struct{}{}
+	}
+	kept := make([]discordEmbedField, 0, len(keep))
+	for _, f := range fields {
+		if _, ok := allowed[f.Name]; ok {
+			kept = append(kept, f)
+		}
+	}
+	return kept
+}
+
+// incidentHeadline renders the first thing an on-call reader needs: what broke,
+// where, how bad, and whether it is still broken.
+//
+// One line, because it is a glance, not a paragraph: the fields below the
+// description already carry the exact timestamps and the incident ID for anyone
+// who needs to look further.
+func (r *Reporter) incidentHeadline(inc models.Incident, report models.Report) string {
+	parts := []string{severityColor(inc.Severity) + " **" + escapeDiscordMarkdown(inc.Title) + "**"}
+	parts = append(parts, "on **"+escapeDiscordMarkdown(affectedLabel(inc))+"**")
+	// The severity word, not only the badge colour: a colour is the only
+	// carrier of "critical" otherwise, which is invisible to a colour-blind
+	// reader and ambiguous to everyone skimming.
+	if inc.Severity != "" {
+		parts = append(parts, "· "+strings.ToUpper(escapeDiscordMarkdown(inc.Severity)))
+	}
+	if inc.Environment != "" {
+		parts = append(parts, "("+escapeDiscordMarkdown(inc.Environment)+")")
+	}
+
+	var state string
+	if inc.ResolvedAt.IsZero() {
+		// "Still down" already carries the status, so the status word itself
+		// would read "Still down — open open". The badge keeps the colour cue.
+		state = fmt.Sprintf("%s Still down — %s so far",
+			statusColor(inc.Status), formatElapsed(report.GeneratedAt.Sub(inc.StartedAt)))
+	} else {
+		state = fmt.Sprintf("%s Recovered after %s",
+			statusColor(inc.Status), formatElapsed(inc.ResolvedAt.Sub(inc.StartedAt)))
+	}
+
+	return strings.Join(parts, " ") + "\n" + state + "\n"
+}
+
+// formatElapsed renders a duration the way an on-call reader says it: "4m12s",
+// "52m", "2h05m", "1d3h". Seconds are shown only while they still matter — a
+// freshly paged incident — and dropped once the unit above is the whole story,
+// because "52m00s" reads like a timer rather than a duration.
+func formatElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		if d%time.Minute == 0 {
+			return fmt.Sprintf("%dm", int(d.Minutes()))
+		}
+		return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
+	case d < 24*time.Hour:
+		if d%time.Hour == 0 {
+			return fmt.Sprintf("%dh", int(d.Hours()))
+		}
+		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
+	default:
+		return fmt.Sprintf("%dd%dh", int(d.Hours())/24, int(d.Hours())%24)
+	}
 }
 
 // triageFindings splits evidence into what an on-call reader needs, in reading
@@ -620,7 +705,7 @@ func formatFindingsForEmbed(evList []models.Evidence, budget int) string {
 	for i, ev := range findings {
 		line := fmt.Sprintf("%s **%s** (%.0f%%) %s%s\n",
 			evidenceIcon(ev.Type), strings.ToUpper(ev.Type), ev.Confidence*100,
-			ev.Content, evidenceSourceSuffix(ev))
+			escapeDiscordMarkdown(ev.Content), evidenceSourceSuffix(ev))
 		// Leave room for the truncation notice and the recommendations section.
 		if sb.Len()+len(line) > budget-200 {
 			fmt.Fprintf(&sb, "\n_… %d more findings omitted_\n", len(findings)-i)
@@ -632,7 +717,7 @@ func formatFindingsForEmbed(evList []models.Evidence, budget int) string {
 	if len(recommendations) > 0 {
 		sb.WriteString("\n**🛠 Suggested Actions**\n")
 		for i, rec := range recommendations {
-			line := fmt.Sprintf("%d. %s\n", i+1, rec.Content)
+			line := fmt.Sprintf("%d. %s\n", i+1, escapeDiscordMarkdown(rec.Content))
 			if sb.Len()+len(line) > budget-20 {
 				fmt.Fprintf(&sb, "_… %d more actions omitted_\n", len(recommendations)-i)
 				break
