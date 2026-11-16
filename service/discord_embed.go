@@ -191,7 +191,7 @@ func (r *Reporter) buildDailyDigestEmbed(ctx context.Context, report models.Repo
 	}
 
 	return discordEmbed{
-		Title:       truncateRunes(fmt.Sprintf("📅 Daily Report · %s", report.PeriodEnd.Format("2006-01-02")), discordMaxTitle),
+		Title:       truncateRunes(fmt.Sprintf("📅 Daily Report · %s", report.PeriodStart.In(loadLocation(report.Timezone)).Format("2006-01-02")), discordMaxTitle),
 		Description: truncateRunes(sb.String(), discordMaxDescription),
 		Color:       color,
 		Footer:      reportFooter(report),

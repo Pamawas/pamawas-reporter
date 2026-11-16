@@ -36,9 +36,14 @@ func TestDailyReportIsOneDigestMessage(t *testing.T) {
 	defer capture.Close()
 
 	incidentID := "inc_abc123"
+	// A morning daily report covers the day that just ended, so the title must
+	// name the day the data belongs to (PeriodStart), not the day of the run
+	// (PeriodEnd), which is midnight of the following day.
 	report := models.Report{
 		ID: "test-id", ReportType: "daily", Timezone: "UTC",
-		TemplateVersion: "pamawas-report-v2", GeneratedAt: time.Now(), PeriodEnd: time.Now(),
+		TemplateVersion: "pamawas-report-v2", GeneratedAt: time.Now(),
+		PeriodStart: time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC),
+		PeriodEnd:   time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC),
 	}
 
 	r, mock := newMockReporter(t, ReporterConfig{DiscordWebhookURL: capture.URL})
@@ -68,6 +73,8 @@ func TestDailyReportIsOneDigestMessage(t *testing.T) {
 	require.Len(t, embeds, 1, "the channel gets exactly one digest card")
 	digest, _ := embeds[0].(map[string]interface{})
 	require.Contains(t, digest["title"], "Daily Report")
+	require.Contains(t, digest["title"], "2026-11-15", "title names the day the report covers")
+	require.NotContains(t, digest["title"], "2026-11-16", "title must not name the following day")
 	desc, _ := digest["description"].(string)
 	require.Contains(t, desc, "Needs attention")
 	require.Contains(t, desc, "Monitoring Target Down")
