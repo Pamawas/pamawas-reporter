@@ -143,3 +143,28 @@ func TestAccessLogCarriesTheRealSpanIDs(t *testing.T) {
 		t.Errorf("trace ID %q is not a 16-byte hex W3C trace id", wantTrace)
 	}
 }
+
+// TestProbeRequestsAreNotTraced keeps health checks and scrapes out of Tempo.
+//
+// Probes run every few seconds forever and explain nothing. At a sample ratio
+// below 1 they also crowd out the requests an operator actually wants to open,
+// which is the opposite of what tracing is for.
+func TestProbeRequestsAreNotTraced(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() { otel.SetTracerProvider(previous) })
+
+	handler := TracingMiddleware("test-service", http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) },
+	))
+
+	for _, path := range []string{"/healthz", "/ready", "/metrics"} {
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+	}
+
+	if spans := recorder.Ended(); len(spans) != 0 {
+		t.Fatalf("recorded %d spans for probes, want 0", len(spans))
+	}
+}
