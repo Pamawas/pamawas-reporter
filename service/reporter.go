@@ -756,6 +756,10 @@ func severityColor(severity string) string {
 // severityRank returns the numeric rank for a severity string. Higher values are more severe. Unknown/empty map to 0.
 func severityRank(severity string) int {
 	switch strings.ToLower(severity) {
+	case "unknown":
+		// The absence of a severity, and the rank of the "unknown" threshold.
+		// It sits below debug so that threshold admits every event.
+		return 0
 	case "debug":
 		return 1
 	case "info":

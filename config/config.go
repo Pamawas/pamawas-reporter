@@ -215,9 +215,11 @@ func (c Config) Validate() error {
 		return fmt.Errorf("circuit_breaker_reset_timeout must be > 0, got %s", c.CircuitBreakerResetTimeout)
 	}
 	switch strings.ToLower(c.HighSeverityThreshold) {
-	case "debug", "info", "warning", "high", "critical":
+	// "unknown" is the absence of a gate: it ranks below every real severity,
+	// so every event passes. Use it when all alerts must flow through.
+	case "unknown", "debug", "info", "warning", "high", "critical":
 	default:
-		return fmt.Errorf("high_severity_threshold must be one of debug|info|warning|high|critical, got %q", c.HighSeverityThreshold)
+		return fmt.Errorf("high_severity_threshold must be one of unknown|debug|info|warning|high|critical, got %q", c.HighSeverityThreshold)
 	}
 	switch c.ReportTemplate {
 	case "v1", "v2":

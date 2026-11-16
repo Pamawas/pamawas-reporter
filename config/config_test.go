@@ -95,3 +95,27 @@ func TestValidate(t *testing.T) {
 		})
 	}
 }
+
+// TestUnknownThresholdAdmitsEverySeverity pins the "no gate" meaning of
+// HIGH_SEVERITY_THRESHOLD=unknown.
+//
+// It ranks below debug, so a threshold of unknown admits events that carry no
+// severity at all as well as every real one. Operators use it when every alert
+// must flow through to an investigation and a report.
+func TestUnknownThresholdAdmitsEverySeverity(t *testing.T) {
+	c := Config{
+		DatabaseURL:                    "db",
+		Port:                           "8080",
+		ServiceToken:                   "token",
+		HighSeverityThreshold:          "unknown",
+		ReportTemplate:                 "v1",
+		EmailSMTPPort:                  587,
+		CircuitBreakerFailureThreshold: 3,
+		CircuitBreakerResetTimeout:     30 * time.Second,
+		RateLimitRPS:                   10,
+		RateLimitBurst:                 20,
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("threshold \"unknown\" must be accepted: %v", err)
+	}
+}
