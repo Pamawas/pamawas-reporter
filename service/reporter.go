@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -360,6 +361,100 @@ ORDER BY e.incident_id, ir.completed_at DESC, e.ordinal`
 
 	return incidentEvidence, rows.Err()
 }
+
+// LoadIncidentFindings returns one incident's investigation findings on demand.
+//
+// The digest can only carry a one-line cause and one action per open condition,
+// and an immediate report is delivered once. This is the full record: every
+// finding the investigation stored, the run it came from, and the same
+// highest-confidence cause and action list the cards use — so a reader does not
+// have to reconstruct them from the evidence array.
+//
+// Returns ErrIncidentNotFound when the incident does not exist, so the handler
+// can answer 404 rather than an empty 200 that looks like "investigated, found
+// nothing".
+func (r *Reporter) LoadIncidentFindings(ctx context.Context, incidentID string) (models.IncidentFindings, error) {
+	out := models.IncidentFindings{Findings: []models.Evidence{}}
+
+	const incidentQuery = `
+		SELECT id, title, status, started_at, last_event_at, resolved_at, severity,
+		       environment, affected_services, correlation_policy, correlation_version,
+		       created_at, updated_at
+		FROM incidents
+		WHERE id = $1
+	`
+	var inc models.Incident
+	var resolvedAt sql.NullTime
+	err := r.db.QueryRowContext(ctx, incidentQuery, incidentID).Scan(
+		&inc.ID, &inc.Title, &inc.Status, &inc.StartedAt, &inc.LastEventAt, &resolvedAt,
+		&inc.Severity, &inc.Environment, pq.Array(&inc.AffectedServices),
+		&inc.CorrelationPolicy, &inc.CorrelationVersion, &inc.CreatedAt, &inc.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return out, ErrIncidentNotFound
+	}
+	if err != nil {
+		return out, err
+	}
+	if resolvedAt.Valid {
+		inc.ResolvedAt = resolvedAt.Time
+	}
+	out.Incident = inc
+
+	// The newest run is the one whose findings are current. An incident that
+	// reopened has several runs; the older ones describe earlier occurrences.
+	const runQuery = `
+		SELECT id, status, started_at, completed_at
+		FROM investigation_runs
+		WHERE incident_id = $1
+		ORDER BY created_at DESC
+		LIMIT 1
+	`
+	var run models.RunStatus
+	var runStarted, runCompleted sql.NullTime
+	runErr := r.db.QueryRowContext(ctx, runQuery, incidentID).Scan(
+		&run.ID, &run.Status, &runStarted, &runCompleted,
+	)
+	switch {
+	case errors.Is(runErr, sql.ErrNoRows):
+		// No investigation exists for this incident. That is a fact worth
+		// returning, not an error: the caller learns the investigation never
+		// ran rather than that the incident is unknown.
+	case runErr != nil:
+		return out, runErr
+	default:
+		if runStarted.Valid {
+			run.StartedAt = &runStarted.Time
+		}
+		if runCompleted.Valid {
+			run.CompletedAt = &runCompleted.Time
+		}
+		out.Run = &run
+	}
+
+	evidence, err := r.loadEvidenceForIncidents(ctx, []string{incidentID})
+	if err != nil {
+		return out, err
+	}
+	if evList, ok := evidence[incidentID]; ok {
+		out.Findings = evList
+	}
+
+	// Reuse the same triage the cards use, so what a reader sees on demand
+	// matches what the alert and digest showed.
+	cause, actions, _ := triageFindings(out.Findings)
+	if cause != nil {
+		out.Summary = cause.Content
+	}
+	for _, action := range actions {
+		out.Actions = append(out.Actions, action.Content)
+	}
+
+	return out, nil
+}
+
+// ErrIncidentNotFound is returned when the requested incident does not exist.
+var ErrIncidentNotFound = errors.New("incident not found")
 
 // generateReportContent generates the report content with honest rendering
 func (r *Reporter) generateReportContent(

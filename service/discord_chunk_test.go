@@ -205,7 +205,7 @@ func TestDailyDigestGroupsOpenConditions(t *testing.T) {
 	}
 
 	var sb strings.Builder
-	digestOpenSection(&sb, open)
+	digestOpenSection(&sb, open, nil)
 	out := sb.String()
 
 	require.Contains(t, out, "(×10, reopened)")

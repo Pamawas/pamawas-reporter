@@ -80,6 +80,31 @@ type Incident struct {
 	UpdatedAt          time.Time `json:"updated_at"`
 }
 
+// IncidentFindings is the on-demand view of an incident's investigation.
+//
+// Investigations run for every incident regardless of severity, and their
+// findings are what the immediate report and the morning digest draw from. The
+// digest can only carry a one-line cause and one action per open condition, so
+// this is how a reader gets the rest without waiting for another report.
+type IncidentFindings struct {
+	Incident Incident   `json:"incident"`
+	Run      *RunStatus `json:"run,omitempty"`
+	Findings []Evidence `json:"findings"`
+	// Summary is the highest-confidence cause, if one was established.
+	Summary string `json:"summary,omitempty"`
+	// Actions are the recommended next steps, in the order the investigation
+	// produced them.
+	Actions []string `json:"actions,omitempty"`
+}
+
+// RunStatus describes the investigation run the findings came from.
+type RunStatus struct {
+	ID          string     `json:"id"`
+	Status      string     `json:"status"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+}
+
 // Metric represents a single Prometheus metric sample.
 type Metric struct {
 	Name   string            `json:"name"`

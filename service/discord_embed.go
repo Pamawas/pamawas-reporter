@@ -37,6 +37,15 @@ const (
 	discordMaxFooter      = 2048
 )
 
+// How much of an open condition's cause and action reach the morning digest.
+//
+// One line each, clipped: the digest is scanned, not read. The full findings
+// stay in the database and are served per incident on demand.
+const (
+	digestCauseLimit  = 180
+	digestActionLimit = 140
+)
+
 // Discord embed colors (colored bar down the left edge).
 const (
 	discordColorResolved = 0x2ECC71 // green
@@ -177,7 +186,13 @@ func (r *Reporter) buildDailyDigestEmbed(ctx context.Context, report models.Repo
 	// someone must decide about today. Recovered ones are grouped by condition,
 	// because "Monitoring Target Down ×12" is what a reader needs from history,
 	// not twelve identical lines.
-	digestOpenSection(&sb, open)
+	//
+	// Findings are loaded only for the open incidents. They are what the reader
+	// has to act on before starting the day; a recovered incident's cause is
+	// history, and 40 paragraphs of it would recreate the wall of text the
+	// digest exists to replace.
+	openEvidence := r.loadEvidenceForOpen(ctx, open)
+	digestOpenSection(&sb, open, openEvidence)
 	digestRecoveredSection(&sb, recovered)
 
 	if len(incidents) == 0 {
@@ -199,6 +214,26 @@ func (r *Reporter) buildDailyDigestEmbed(ctx context.Context, report models.Repo
 	}
 }
 
+// loadEvidenceForOpen fetches findings for the incidents that are still open.
+//
+// A failure is logged and treated as "no findings": the digest must still go
+// out, and a missing cause line is better than a missing report.
+func (r *Reporter) loadEvidenceForOpen(ctx context.Context, open []models.Incident) map[string][]models.Evidence {
+	if len(open) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(open))
+	for _, inc := range open {
+		ids = append(ids, inc.ID)
+	}
+	evidence, err := r.loadEvidenceForIncidents(ctx, ids)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to load findings for open incidents; digest continues without them")
+		return nil
+	}
+	return evidence
+}
+
 // digestOpenSection writes incidents that still need attention, grouped by
 // condition.
 //
@@ -207,7 +242,12 @@ func (r *Reporter) buildDailyDigestEmbed(ctx context.Context, report models.Repo
 // real report. Grouping shows the reader that it is one problem, how many times
 // it reopened, and how long the earliest instance has been open — which is the
 // number that matters.
-func digestOpenSection(sb *strings.Builder, open []models.Incident) {
+//
+// Each group also carries its most likely cause and the first recommended
+// action, on two indented lines. That is the whole reason the investigation
+// runs: an on-call reader needs to know what to do about the open condition,
+// and a bare "still open" line made them open a second card to find out.
+func digestOpenSection(sb *strings.Builder, open []models.Incident, evidence map[string][]models.Evidence) {
 	if len(open) == 0 {
 		return
 	}
@@ -218,6 +258,11 @@ func digestOpenSection(sb *strings.Builder, open []models.Incident) {
 		affected []string
 		count    int
 		earliest time.Time
+		// evidenceFrom is the most recent occurrence, whose findings are the
+		// current ones. An older occurrence's cause may describe a different
+		// failure of the same condition.
+		evidenceFrom string
+		latest       time.Time
 	}
 	var order []string
 	groups := make(map[string]*group)
@@ -227,7 +272,8 @@ func digestOpenSection(sb *strings.Builder, open []models.Incident) {
 		g, ok := groups[key]
 		if !ok {
 			g = &group{title: inc.Title, severity: inc.Severity,
-				affected: inc.AffectedServices, earliest: inc.StartedAt}
+				affected: inc.AffectedServices, earliest: inc.StartedAt,
+				evidenceFrom: inc.ID, latest: inc.StartedAt}
 			groups[key] = g
 			order = append(order, key)
 		}
@@ -235,12 +281,16 @@ func digestOpenSection(sb *strings.Builder, open []models.Incident) {
 		if inc.StartedAt.Before(g.earliest) {
 			g.earliest = inc.StartedAt
 		}
+		if inc.StartedAt.After(g.latest) {
+			g.latest = inc.StartedAt
+			g.evidenceFrom = inc.ID
+		}
 	}
 
 	fmt.Fprintf(sb, "\n**🔴 Needs attention**\n")
 	for i, key := range order {
 		g := groups[key]
-		if sb.Len() > discordMaxDescription-120 {
+		if sb.Len() > discordMaxDescription-300 {
 			fmt.Fprintf(sb, "• _… and %d more conditions_\n", len(order)-i)
 			return
 		}
@@ -254,7 +304,45 @@ func digestOpenSection(sb *strings.Builder, open []models.Incident) {
 			fmt.Fprintf(sb, " (×%d, reopened)", g.count)
 		}
 		sb.WriteString("\n")
+
+		writeDigestTriageLines(sb, evidence[g.evidenceFrom])
 	}
+}
+
+// writeDigestTriageLines writes a one-line cause and a one-line action for an
+// open condition.
+//
+// Deliberately one line each and clipped: the digest is read in ten seconds.
+// The full findings, including every fact and every action, stay in the
+// database and are available per incident on demand.
+func writeDigestTriageLines(sb *strings.Builder, evList []models.Evidence) {
+	cause, actions, _ := triageFindings(evList)
+
+	if cause != nil {
+		label := "🎯"
+		if cause.Type == "hypothesis" {
+			label = "💭" // unconfirmed: say so with the icon, not a paragraph
+		}
+		fmt.Fprintf(sb, "  %s %s\n", label, clipSentence(cause.Content, digestCauseLimit))
+	}
+	if len(actions) > 0 {
+		fmt.Fprintf(sb, "  🛠 %s\n", clipSentence(actions[0].Content, digestActionLimit))
+	}
+}
+
+// clipSentence shortens text to at most limit runes, cutting at a word
+// boundary so the result does not end mid-token.
+func clipSentence(s string, limit int) string {
+	flat := strings.Join(strings.Fields(s), " ")
+	if len([]rune(flat)) <= limit {
+		return escapeDiscordMarkdown(flat)
+	}
+	runes := []rune(flat)
+	cut := string(runes[:limit])
+	if idx := strings.LastIndex(cut, " "); idx > limit/2 {
+		cut = cut[:idx]
+	}
+	return escapeDiscordMarkdown(strings.TrimRight(cut, " ,.;:")) + "…"
 }
 
 // digestRecoveredSection writes recovered incidents grouped by condition.

@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -266,6 +267,44 @@ func (h *Handler) RetryStalledDeliveriesHandler(w http.ResponseWriter, r *http.R
 		"recovered": count,
 		"message":   "Stalled delivery attempts recovered",
 	})
+}
+
+// IncidentFindingsHandler serves one incident's investigation findings.
+//
+//   - GET /api/v1/incidents/{id}/findings
+//
+// Investigations run for every incident regardless of severity, but the alert
+// card and the morning digest can only carry a cause and one action. This is
+// the full record on demand: every finding, the run it came from, and the same
+// cause and action list the cards derived from it.
+func (h *Handler) IncidentFindingsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		log.Error().Str("method", r.Method).Str("path", r.URL.Path).
+			Msg("IncidentFindingsHandler: method not allowed")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	incidentID := r.PathValue("id")
+	if incidentID == "" {
+		http.Error(w, "incident id is required", http.StatusBadRequest)
+		return
+	}
+
+	findings, err := h.reporter.LoadIncidentFindings(r.Context(), incidentID)
+	if err != nil {
+		if errors.Is(err, service.ErrIncidentNotFound) {
+			http.Error(w, "Incident not found", http.StatusNotFound)
+			return
+		}
+		log.Error().Err(err).Str("incident_id", incidentID).
+			Msg("IncidentFindingsHandler: failed to load findings")
+		http.Error(w, "Failed to load incident findings", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, findings)
 }
 
 // AlertResolvedHandler sends an "alert resolved" message for a resolved event.

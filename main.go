@@ -107,6 +107,7 @@ func main() {
 	r.HandleFunc("/api/v1/alerts/resolved", h.AlertResolvedHandler)
 	r.HandleFunc("/api/v1/alerts", h.AlertHandler)
 	r.HandleFunc("/api/v1/retry-stalled-deliveries", h.RetryStalledDeliveriesHandler)
+	r.HandleFunc("GET /api/v1/incidents/{id}/findings", h.IncidentFindingsHandler)
 	registerMetricsRoutes(r, h.MetricsHandler())
 
 	// Wrap router with middleware
