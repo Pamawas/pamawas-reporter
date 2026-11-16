@@ -119,8 +119,11 @@ func main() {
 		"/api/v1/retry-stalled-deliveries": {RPS: cfg.RateLimitRPS, Burst: cfg.RateLimitBurst},
 		"/api/v1/status":                   {RPS: cfg.RateLimitRPS, Burst: cfg.RateLimitBurst},
 	}, handler)
+	// Tracing is outermost so every request gets a span, and so the logging
+	// middleware below it can log the real trace and span IDs.
 	handler = middleware.LoggingMiddleware("pamawas-reporter", handler)
 	handler = middleware.ErrorLoggingMiddleware("pamawas-reporter", handler)
+	handler = middleware.TracingMiddleware("pamawas-reporter", handler)
 	// Service-to-service auth. Applied after the loggers so a rejected request
 	// is still logged, and it covers every /api/v1 route — those trigger
 	// Discord/Telegram/email delivery and report generation, so an
