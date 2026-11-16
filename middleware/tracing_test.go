@@ -160,7 +160,9 @@ func TestProbeRequestsAreNotTraced(t *testing.T) {
 		func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) },
 	))
 
-	for _, path := range []string{"/healthz", "/ready", "/metrics"} {
+	// The trailing-slash form is what a redirect lands on, and it must be
+	// excluded for the same reason.
+	for _, path := range []string{"/healthz", "/ready", "/metrics", "/metrics/"} {
 		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
 	}
 
