@@ -353,7 +353,15 @@ func (r *Reporter) buildSingleIncidentEmbed(report models.Report, inc models.Inc
 
 	var sb strings.Builder
 	if cause != nil {
-		sb.WriteString("**🎯 Likely cause**\n")
+		// Say which kind of claim this is. A hypothesis is the investigator
+		// admitting it did not converge, and presenting that under "Likely
+		// cause" with no qualifier told a paged engineer the opposite of what
+		// the evidence supports.
+		if cause.Type == "hypothesis" {
+			fmt.Fprintf(&sb, "**🎯 Possible cause** _(hypothesis, %.0f%% confidence)_\n", cause.Confidence*100)
+		} else {
+			sb.WriteString("**🎯 Likely cause**\n")
+		}
 		fmt.Fprintf(&sb, "%s%s\n", cause.Content, evidenceSourceSuffix(*cause))
 	}
 	if len(actions) > 0 {

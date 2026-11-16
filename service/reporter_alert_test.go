@@ -644,3 +644,42 @@ func TestSummarizeDayDegradesQuietly(t *testing.T) {
 		t.Errorf("expected no summary without incidents, got %q", got)
 	}
 }
+
+// TestHypothesisIsNotPresentedAsLikelyCause pins the honesty of the top line.
+// A hypothesis is the investigator admitting it did not converge; showing it
+// under "Likely cause" with no qualifier tells a paged engineer the opposite
+// of what the evidence supports.
+func TestHypothesisIsNotPresentedAsLikelyCause(t *testing.T) {
+	inc := models.Incident{
+		ID: "inc_1", Title: "Monitoring Target Down", Status: "open", Severity: "critical",
+		Environment: "production", AffectedServices: []string{"last-labs"},
+		StartedAt: time.Now().Add(-10 * time.Minute),
+	}
+	r := &Reporter{}
+
+	hypothesisCard := r.buildSingleIncidentEmbed(
+		models.Report{ReportType: "high_severity", Timezone: "UTC"},
+		inc,
+		[]models.Evidence{{Type: "hypothesis", Content: "The node may be overloaded.", Confidence: 0.3}},
+		"newly_started",
+	)
+	if strings.Contains(hypothesisCard.Description, "Likely cause") {
+		t.Errorf("a hypothesis must not be labelled a likely cause:\n%s", hypothesisCard.Description)
+	}
+	if !strings.Contains(hypothesisCard.Description, "Possible cause") {
+		t.Errorf("hypothesis card should say possible cause:\n%s", hypothesisCard.Description)
+	}
+	if !strings.Contains(hypothesisCard.Description, "30%") {
+		t.Errorf("hypothesis card should state its confidence:\n%s", hypothesisCard.Description)
+	}
+
+	factCard := r.buildSingleIncidentEmbed(
+		models.Report{ReportType: "high_severity", Timezone: "UTC"},
+		inc,
+		[]models.Evidence{{Type: "likely_cause", Content: "The node ran out of memory.", Confidence: 0.9}},
+		"newly_started",
+	)
+	if !strings.Contains(factCard.Description, "Likely cause") {
+		t.Errorf("a likely_cause should keep its label:\n%s", factCard.Description)
+	}
+}
