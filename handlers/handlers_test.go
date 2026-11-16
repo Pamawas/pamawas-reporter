@@ -2,12 +2,14 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/prometheus/client_golang/prometheus"
@@ -173,5 +175,71 @@ func TestStatusAndMetricsHandlers(t *testing.T) {
 	}
 	if h.MetricsHandler() == nil {
 		t.Fatal("MetricsHandler returned nil")
+	}
+}
+
+// TestIncidentFindingsHandlerServesTheRoute exercises the real mux pattern, so
+// a broken route registration fails here rather than in production.
+func TestIncidentFindingsHandlerServesTheRoute(t *testing.T) {
+	h, mock := newTestHandler(t)
+
+	started := time.Date(2026, 11, 16, 1, 37, 20, 0, time.UTC)
+	mock.ExpectQuery("SELECT id, title, status, started_at").
+		WithArgs("inc_route").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "title", "status", "started_at", "last_event_at", "resolved_at",
+			"severity", "environment", "affected_services", "correlation_policy",
+			"correlation_version", "created_at", "updated_at",
+		}).AddRow("inc_route", "Monitoring Target Down", "open", started, started, nil,
+			"critical", "production", "{last-labs}", "pamawas-correlation-v1", 1, started, started))
+	mock.ExpectQuery("FROM investigation_runs").
+		WithArgs("inc_route").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("FROM evidence e").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "incident_id", "type", "content", "source", "source_detail",
+			"confidence", "supports_evidence", "contradicts_evidence", "ordinal",
+		}))
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/incidents/{id}/findings", h.IncidentFindingsHandler)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/incidents/inc_route/findings", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Incident struct {
+			ID string `json:"id"`
+		} `json:"incident"`
+		Findings []map[string]any `json:"findings"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Incident.ID != "inc_route" {
+		t.Errorf("incident id = %q", body.Incident.ID)
+	}
+	if body.Findings == nil {
+		t.Error("findings must be an empty array, not null")
+	}
+}
+
+func TestIncidentFindingsHandlerReturns404ForUnknownIncident(t *testing.T) {
+	h, mock := newTestHandler(t)
+	mock.ExpectQuery("SELECT id, title, status, started_at").
+		WithArgs("inc_missing").
+		WillReturnError(sql.ErrNoRows)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/incidents/{id}/findings", h.IncidentFindingsHandler)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/incidents/inc_missing/findings", nil))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }

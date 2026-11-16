@@ -213,3 +213,66 @@ func TestDailyDigestGroupsOpenConditions(t *testing.T) {
 		"the condition must appear once, not once per incident")
 	require.Contains(t, out, "open since")
 }
+
+// TestDailyDigestShowsCauseAndActionForOpenConditions pins what the morning
+// digest gained. Investigations run for every incident regardless of severity,
+// but the digest used to show only the condition and how long it had been open,
+// so a reader had to open a second card to learn what was wrong.
+//
+// Recovered conditions stay terse: their cause is history, and one paragraph
+// each would rebuild the wall of text the digest exists to replace.
+func TestDailyDigestShowsCauseAndActionForOpenConditions(t *testing.T) {
+	base := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+	open := []models.Incident{{
+		ID: "inc_open", Title: "Monitoring Target Down", Status: "open",
+		Severity: "critical", AffectedServices: []string{"last-labs"}, StartedAt: base.Add(-time.Hour),
+	}}
+	evidence := map[string][]models.Evidence{
+		"inc_open": {
+			{Type: "likely_cause", Content: "netbird-agent tunnel dropped on last-labs", Confidence: 0.85},
+			{Type: "recommendation", Content: "Restart netbird-agent and check relay connectivity", Confidence: 0.8},
+			{Type: "fact", Content: "up metric dropped to 0 at 03:42 UTC", Confidence: 1.0},
+		},
+	}
+
+	var sb strings.Builder
+	digestOpenSection(&sb, open, evidence)
+	out := sb.String()
+
+	require.Contains(t, out, "netbird-agent tunnel dropped")
+	require.Contains(t, out, "Restart netbird-agent")
+	// Facts stay out of the digest: they are what the full findings are for.
+	require.NotContains(t, out, "up metric dropped to 0",
+		"the digest gets a cause and an action, not the evidence list")
+}
+
+// TestDailyDigestMarksAHypothesisAsUnconfirmed keeps the digest honest: an
+// unconfirmed cause must not read like a conclusion in one line.
+func TestDailyDigestMarksAHypothesisAsUnconfirmed(t *testing.T) {
+	base := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+	open := []models.Incident{{
+		ID: "inc_h", Title: "RAM", Status: "open", Severity: "high",
+		AffectedServices: []string{"koba-labs"}, StartedAt: base,
+	}}
+	evidence := map[string][]models.Evidence{
+		"inc_h": {{Type: "hypothesis", Content: "possible memory pressure", Confidence: 0.3}},
+	}
+
+	var sb strings.Builder
+	digestOpenSection(&sb, open, evidence)
+
+	require.Contains(t, sb.String(), "💭")
+	require.NotContains(t, sb.String(), "🎯")
+}
+
+func TestClipSentenceCutsAtWordBoundary(t *testing.T) {
+	long := "The node ran out of memory because the wazuh container leaked heap steadily"
+	got := clipSentence(long, 30)
+
+	require.LessOrEqual(t, len([]rune(got)), 31, "clip must respect the limit: %q", got)
+	require.True(t, strings.HasSuffix(got, "…"), "clipped text must show it was clipped: %q", got)
+	require.NotContains(t, got, "  ", "no double spaces from the cut")
+
+	short := clipSentence("short cause", 100)
+	require.Equal(t, "short cause", short)
+}

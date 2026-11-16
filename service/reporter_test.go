@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/require"
 
 	"github.com/Pamawas/pamawas-reporter/metrics"
 	"github.com/Pamawas/pamawas-reporter/models"
@@ -120,3 +122,96 @@ func TestSendToTelegram(t *testing.T) {
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestLoadIncidentFindingsReturnsCauseAndActions covers the on-demand read.
+//
+// Investigations run for every incident regardless of severity; this is how a
+// reader gets the full record rather than the one-line summary the digest
+// carries.
+func TestLoadIncidentFindingsReturnsCauseAndActions(t *testing.T) {
+	r, mock := newMockReporter(t, ReporterConfig{})
+
+	started := time.Date(2026, 11, 16, 1, 37, 20, 0, time.UTC)
+	mock.ExpectQuery("SELECT id, title, status, started_at").
+		WithArgs("inc_1").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "title", "status", "started_at", "last_event_at", "resolved_at",
+			"severity", "environment", "affected_services", "correlation_policy",
+			"correlation_version", "created_at", "updated_at",
+		}).AddRow("inc_1", "Monitoring Target Down", "open", started, started, nil,
+			"critical", "production", "{last-labs}", "pamawas-correlation-v1", 1, started, started))
+
+	mock.ExpectQuery("SELECT id, status, started_at, completed_at FROM investigation_runs").
+		WithArgs("inc_1").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "status", "started_at", "completed_at"}).
+			AddRow("irun_1", "completed", started, started.Add(4*time.Minute)))
+
+	mock.ExpectQuery("FROM evidence e").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "incident_id", "type", "content", "source", "source_detail",
+			"confidence", "supports_evidence", "contradicts_evidence", "ordinal",
+		}).
+			AddRow("ev_1", "inc_1", "likely_cause", "netbird tunnel dropped", "llm",
+				"prometheus up + loki docker_logs", 0.85, []byte("[]"), []byte("[]"), 0).
+			AddRow("ev_2", "inc_1", "recommendation", "Restart netbird-agent", "llm",
+				"", 0.8, []byte("[]"), []byte("[]"), 1))
+
+	got, err := r.LoadIncidentFindings(context.Background(), "inc_1")
+	require.NoError(t, err)
+
+	require.Equal(t, "inc_1", got.Incident.ID)
+	require.NotNil(t, got.Run)
+	require.Equal(t, "completed", got.Run.Status)
+	require.Len(t, got.Findings, 2)
+	require.Equal(t, "netbird tunnel dropped", got.Summary)
+	require.Equal(t, []string{"Restart netbird-agent"}, got.Actions)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestLoadIncidentFindingsReportsAnUnknownIncident keeps 404 distinct from
+// "investigated, found nothing". A 200 with an empty findings list would tell
+// the caller the investigation ran and learned nothing.
+func TestLoadIncidentFindingsReportsAnUnknownIncident(t *testing.T) {
+	r, mock := newMockReporter(t, ReporterConfig{})
+
+	mock.ExpectQuery("SELECT id, title, status, started_at").
+		WithArgs("inc_missing").
+		WillReturnError(sql.ErrNoRows)
+
+	_, err := r.LoadIncidentFindings(context.Background(), "inc_missing")
+	require.ErrorIs(t, err, ErrIncidentNotFound)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestLoadIncidentFindingsSurvivesAMissingInvestigation returns the incident
+// with no run rather than an error: "the investigation never ran" is a fact
+// the caller can act on.
+func TestLoadIncidentFindingsSurvivesAMissingInvestigation(t *testing.T) {
+	r, mock := newMockReporter(t, ReporterConfig{})
+
+	started := time.Date(2026, 11, 16, 1, 37, 20, 0, time.UTC)
+	mock.ExpectQuery("SELECT id, title, status, started_at").
+		WithArgs("inc_2").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "title", "status", "started_at", "last_event_at", "resolved_at",
+			"severity", "environment", "affected_services", "correlation_policy",
+			"correlation_version", "created_at", "updated_at",
+		}).AddRow("inc_2", "CPU", "open", started, started, nil,
+			"warning", "production", "{kube-2}", "pamawas-correlation-v1", 1, started, started))
+
+	mock.ExpectQuery("FROM investigation_runs").
+		WithArgs("inc_2").
+		WillReturnError(sql.ErrNoRows)
+
+	mock.ExpectQuery("FROM evidence e").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "incident_id", "type", "content", "source", "source_detail",
+			"confidence", "supports_evidence", "contradicts_evidence", "ordinal",
+		}))
+
+	got, err := r.LoadIncidentFindings(context.Background(), "inc_2")
+	require.NoError(t, err)
+	require.Nil(t, got.Run)
+	require.Empty(t, got.Findings)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
