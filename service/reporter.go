@@ -399,6 +399,9 @@ func (r *Reporter) LoadIncidentFindings(ctx context.Context, incidentID string) 
 	if resolvedAt.Valid {
 		inc.ResolvedAt = resolvedAt.Time
 	}
+	if len(inc.AffectedServices) == 0 {
+		inc.AffectedServices = r.lookupFallbackAffected(ctx, inc.ID)
+	}
 	out.Incident = inc
 
 	// The newest run is the one whose findings are current. An incident that
@@ -887,6 +890,39 @@ func parseAffectedServices(raw []byte) ([]string, error) {
 	return nil, fmt.Errorf("invalid affected_services format: %s", string(raw))
 }
 
+// lookupFallbackAffected extracts the affected entity (e.g. pod, instance) from
+// the incident's underlying events when affected_services is empty in the incident row.
+func (r *Reporter) lookupFallbackAffected(ctx context.Context, incidentID string) []string {
+	if r.db == nil || incidentID == "" {
+		return []string{}
+	}
+	const query = `
+		SELECT DISTINCT val
+		FROM incident_events ie
+		JOIN events e ON e.id = ie.event_id
+		CROSS JOIN LATERAL (
+			VALUES (e.labels->>'pod'), (e.labels->>'instance'), (e.labels->>'container'), (e.labels->>'target'), (e.labels->>'node'), (e.service)
+		) AS t(val)
+		WHERE ie.incident_id = $1 AND val IS NOT NULL AND val != ''
+		LIMIT 3
+	`
+	rows, err := r.db.QueryContext(ctx, query, incidentID)
+	if err != nil {
+		return []string{}
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	var result []string
+	for rows.Next() {
+		var val string
+		if err := rows.Scan(&val); err == nil && val != "" {
+			result = append(result, val)
+		}
+	}
+	return result
+}
+
 // getIncidentsByIDs loads incident details by IDs
 func (r *Reporter) getIncidentsByIDs(ctx context.Context, incidentIDs []string) ([]models.Incident, error) {
 	if len(incidentIDs) == 0 {
@@ -928,6 +964,9 @@ ORDER BY started_at DESC`
 		services, parseErr := parseAffectedServices(rawServices)
 		if parseErr != nil {
 			return nil, parseErr
+		}
+		if len(services) == 0 {
+			services = r.lookupFallbackAffected(ctx, inc.ID)
 		}
 		inc.AffectedServices = services
 		incidents = append(incidents, inc)

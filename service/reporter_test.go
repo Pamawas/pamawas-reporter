@@ -215,3 +215,15 @@ func TestLoadIncidentFindingsSurvivesAMissingInvestigation(t *testing.T) {
 	require.Empty(t, got.Findings)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestLookupFallbackAffected(t *testing.T) {
+	r, mock := newMockReporter(t, ReporterConfig{})
+
+	mock.ExpectQuery("SELECT DISTINCT val FROM incident_events").
+		WithArgs("inc_crash").
+		WillReturnRows(sqlmock.NewRows([]string{"val"}).AddRow("pamawas-ingest-pod-1"))
+
+	result := r.lookupFallbackAffected(context.Background(), "inc_crash")
+	require.Equal(t, []string{"pamawas-ingest-pod-1"}, result)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
