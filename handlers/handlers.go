@@ -406,10 +406,10 @@ func (h *Handler) AlertHandler(w http.ResponseWriter, r *http.Request) {
 
 // VerifyReportHandler delivers a stale-incident verification outcome as a card.
 //
-// The correlator sends this after the investigator verifies an incident that
-// went silent past INCIDENT_STALE_AFTER. The verdict and evidence explain why
-// the incident was closed (recovered) or kept open (still down). Service-token
-// protected like every mutation endpoint.
+// The scheduler sends this after the investigator completes verification of an
+// incident that went silent past INCIDENT_STALE_AFTER. The verdict and evidence
+// explain why the incident was closed (recovered) or kept open (still down).
+// Service-token protected like every mutation endpoint.
 func (h *Handler) VerifyReportHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodPost {

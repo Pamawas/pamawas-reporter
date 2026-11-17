@@ -153,11 +153,45 @@ func TestAlertResolvedHandlerAcceptsEventSourcedPayload(t *testing.T) {
 
 func TestAlertHandlersRejectNonPost(t *testing.T) {
 	h, _, _ := newAlertHandler(t)
-	for name, fn := range map[string]http.HandlerFunc{"alert": h.AlertHandler, "resolved": h.AlertResolvedHandler} {
+	for name, fn := range map[string]http.HandlerFunc{
+		"alert":                h.AlertHandler,
+		"resolved":             h.AlertResolvedHandler,
+		"verification-reports": h.VerifyReportHandler,
+	} {
 		rec := httptest.NewRecorder()
-		fn(rec, httptest.NewRequest(http.MethodGet, "/api/v1/alerts", nil))
+		fn(rec, httptest.NewRequest(http.MethodGet, "/api/v1/verification-reports", nil))
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s: expected 405, got %d", name, rec.Code)
 		}
+	}
+}
+
+func TestVerifyReportHandler_PostVerificationReports(t *testing.T) {
+	h, _, payloads := newAlertHandler(t)
+
+	body, err := json.Marshal(models.VerifyReportPayload{
+		ContractVersion: 1,
+		IncidentID:      "inc_verify_test",
+		Verdict:         "recovered",
+		Title:           "Target Service Recovered",
+		Severity:        "critical",
+		Environment:     "production",
+		Target:          "order-service",
+		Reason:          "HTTP probes return 200",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/verification-reports", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.VerifyReportHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(*payloads) != 1 {
+		t.Fatalf("expected 1 delivery, got %d", len(*payloads))
 	}
 }
