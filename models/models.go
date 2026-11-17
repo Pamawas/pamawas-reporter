@@ -345,6 +345,24 @@ type AlertResponse struct {
 	Message string `json:"message"`
 }
 
+// VerifyReportPayload is the request body for POST /api/v1/verify-reports.
+//
+// The correlator sends it after the investigator verifies a stale-open
+// incident: the verdict says whether the incident was closed (recovered) or
+// kept open (still_down), and the reason and findings say why. The reporter
+// renders it as a one-off notification card.
+type VerifyReportPayload struct {
+	ContractVersion int        `json:"contract_version"`
+	IncidentID      string     `json:"incident_id"`
+	Verdict         string     `json:"verdict"`
+	Title           string     `json:"title,omitempty"`
+	Severity        string     `json:"severity,omitempty"`
+	Environment     string     `json:"environment,omitempty"`
+	Target          string     `json:"target,omitempty"`
+	Reason          string     `json:"reason,omitempty"`
+	Findings        []Evidence `json:"findings,omitempty"`
+}
+
 // InvestigationReview represents a review of an investigation run
 type InvestigationReview struct {
 	ID             string    `json:"id"`

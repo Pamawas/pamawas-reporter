@@ -1103,6 +1103,86 @@ func alertFooter(alertKey string) *discordEmbedFooter {
 	}
 }
 
+// buildVerifyEmbed renders a stale-incident verification outcome as a card.
+//
+// This is the "why" behind a close-or-keep-open decision. The correlator ran a
+// verification because an incident went silent past INCIDENT_STALE_AFTER; this
+// card tells the operator what the evidence said, and therefore why the
+// incident was closed (recovered) or left open (still down).
+func buildVerifyEmbed(payload models.VerifyReportPayload) discordEmbed {
+	description := payload.Reason
+	if description == "" {
+		description = "No reason was recorded for this verification."
+	}
+
+	fields := []discordEmbedField{}
+	if payload.Target != "" {
+		fields = append(fields, discordEmbedField{Name: "Target", Value: escapeDiscordMarkdown(payload.Target), Inline: true})
+	}
+	if payload.Severity != "" {
+		fields = append(fields, discordEmbedField{Name: "Severity", Value: escapeDiscordMarkdown(payload.Severity), Inline: true})
+	}
+	if payload.Environment != "" {
+		fields = append(fields, discordEmbedField{Name: "Environment", Value: escapeDiscordMarkdown(payload.Environment), Inline: true})
+	}
+	fields = append(fields, discordEmbedField{Name: "Verdict", Value: payload.Verdict, Inline: true})
+
+	// Each finding is one evidence line, so a reader sees the support behind
+	// the verdict without scrolling a wall of text.
+	var evidence strings.Builder
+	for _, f := range payload.Findings {
+		line := fmt.Sprintf("• **%s** (%.0f%%) %s", strings.ToUpper(f.Type), f.Confidence*100, clipSentence(f.Content, cardEvidenceLimit))
+		if evidence.Len() > 0 {
+			evidence.WriteString("\n")
+		}
+		evidence.WriteString(line)
+	}
+	if evidence.Len() > 0 {
+		fields = append(fields, discordEmbedField{Name: "Evidence", Value: truncateRunes(evidence.String(), discordMaxFieldValue), Inline: false})
+	}
+	fields = trimAlertFields(fields)
+
+	verdictTitle := "⚠️"
+	if payload.Verdict == "recovered" {
+		verdictTitle = "✅"
+	}
+	title := truncateRunes(
+		fmt.Sprintf("%s Verification: %s — %s", verdictTitle, payload.Verdict, payload.Title),
+		discordMaxTitle,
+	)
+
+	return discordEmbed{
+		Title:       escapeDiscordMarkdown(title),
+		Description: truncateRunes(description, discordMaxDescription),
+		Color:       severityEmbedColor(payload.Severity),
+		Fields:      fields,
+		Footer: &discordEmbedFooter{
+			Text: truncateRunes("Incident: "+payload.IncidentID, discordMaxFooter),
+		},
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+// formatVerifyMessage renders a verification outcome for text channels
+// (Telegram, email).
+func formatVerifyMessage(payload models.VerifyReportPayload) string {
+	var sb strings.Builder
+	heading := "⚠️ *Verification: still down*"
+	if payload.Verdict == "recovered" {
+		heading = "✅ *Verification: recovered*"
+	}
+	sb.WriteString(heading + "\n")
+	if payload.Title != "" {
+		fmt.Fprintf(&sb, "Alert: %s\n", payload.Title)
+	}
+	if payload.Target != "" {
+		fmt.Fprintf(&sb, "Target: %s\n", payload.Target)
+	}
+	fmt.Fprintf(&sb, "Verdict: %s\n", payload.Verdict)
+	sb.WriteString("Why: " + payload.Reason + "\n")
+	return sb.String()
+}
+
 // buildResolvedAlertEmbed renders the alert-resolved message as a card.
 //
 // The description states the one fact the fields cannot: how long it was out.

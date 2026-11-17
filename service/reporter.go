@@ -1789,6 +1789,34 @@ func (r *Reporter) SendAlert(ctx context.Context, payload models.AlertPayload) (
 	}, nil
 }
 
+// SendVerifyReport delivers a stale-incident verification outcome.
+//
+// The correlator calls this after the investigator verifies an incident that
+// went silent past INCIDENT_STALE_AFTER. The verdict and its evidence are sent
+// as a one-off card explaining why the incident was closed (recovered) or left
+// open (still down). It is not one-shot like the immediate alert: a later
+// re-verification of the same incident sends its own card.
+func (r *Reporter) SendVerifyReport(ctx context.Context, payload models.VerifyReportPayload) (*models.AlertResponse, error) {
+	if payload.IncidentID == "" {
+		return &models.AlertResponse{Sent: false, Skipped: true, Reason: "invalid_request", Message: "incident_id is required"}, nil
+	}
+	if payload.Verdict != "recovered" && payload.Verdict != "still_down" {
+		return &models.AlertResponse{Sent: false, Skipped: true, Reason: "invalid_request", Message: "verdict must be recovered or still_down"}, nil
+	}
+
+	content := alertContent{
+		Text:    formatVerifyMessage(payload),
+		Subject: "Verification: " + payload.Verdict + " — " + payload.Title,
+		Embed:   buildVerifyEmbed(payload),
+	}
+	sent, firstErr := r.deliverAlert(ctx, payload.IncidentID, content)
+
+	if !sent && firstErr != nil {
+		return &models.AlertResponse{Sent: false, Skipped: false, Reason: "delivery_failed", Message: firstErr.Error()}, nil
+	}
+	return &models.AlertResponse{Sent: sent, Skipped: false, Message: "verification report sent"}, nil
+}
+
 // alertSubjectFrom builds the alert's identity from the event-sourced payload.
 // There is no incident row to read from at alert time.
 func alertSubjectFrom(payload models.AlertPayload) alertSubject {

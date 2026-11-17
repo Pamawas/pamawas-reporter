@@ -106,6 +106,7 @@ func main() {
 	r.HandleFunc("/api/v1/status", h.StatusHandler)
 	r.HandleFunc("/api/v1/alerts/resolved", h.AlertResolvedHandler)
 	r.HandleFunc("/api/v1/alerts", h.AlertHandler)
+	r.HandleFunc("/api/v1/verify-reports", h.VerifyReportHandler)
 	r.HandleFunc("/api/v1/retry-stalled-deliveries", h.RetryStalledDeliveriesHandler)
 	r.HandleFunc("GET /api/v1/incidents/{id}/findings", h.IncidentFindingsHandler)
 	registerMetricsRoutes(r, h.MetricsHandler())
@@ -116,6 +117,7 @@ func main() {
 		"/api/v1/reports":                  {RPS: cfg.RateLimitRPS, Burst: cfg.RateLimitBurst},
 		"/api/v1/alerts/resolved":          {RPS: cfg.RateLimitRPS, Burst: cfg.RateLimitBurst},
 		"/api/v1/alerts":                   {RPS: cfg.RateLimitRPS, Burst: cfg.RateLimitBurst},
+		"/api/v1/verify-reports":           {RPS: cfg.RateLimitRPS, Burst: cfg.RateLimitBurst},
 		"/api/v1/retry-stalled-deliveries": {RPS: cfg.RateLimitRPS, Burst: cfg.RateLimitBurst},
 		"/api/v1/status":                   {RPS: cfg.RateLimitRPS, Burst: cfg.RateLimitBurst},
 	}, handler)

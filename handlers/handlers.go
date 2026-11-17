@@ -404,6 +404,49 @@ func (h *Handler) AlertHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
+// VerifyReportHandler delivers a stale-incident verification outcome as a card.
+//
+// The correlator sends this after the investigator verifies an incident that
+// went silent past INCIDENT_STALE_AFTER. The verdict and evidence explain why
+// the incident was closed (recovered) or kept open (still down). Service-token
+// protected like every mutation endpoint.
+func (h *Handler) VerifyReportHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		log.Error().Str("method", r.Method).Str("path", r.URL.Path).
+			Msg("VerifyReportHandler: method not allowed")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var payload models.VerifyReportPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		log.Error().Err(err).Str("path", r.URL.Path).
+			Msg("VerifyReportHandler: invalid request body")
+		http.Error(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	resp, err := h.reporter.SendVerifyReport(r.Context(), payload)
+	if err != nil {
+		log.Error().Err(err).
+			Str("incident_id", payload.IncidentID).
+			Str("verdict", payload.Verdict).
+			Msg("VerifyReportHandler: delivery failed")
+		http.Error(w, fmt.Sprintf("Verification report delivery failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	log.Info().
+		Str("incident_id", payload.IncidentID).
+		Str("verdict", payload.Verdict).
+		Bool("sent", resp.Sent).
+		Msg("VerifyReportHandler: verification report processed")
+
+	w.WriteHeader(http.StatusOK)
+	writeJSON(w, resp)
+}
+
 // validateAlertPayload enforces the event-sourced alert contract. There is no
 // incident at alert time, so an incident id is neither required nor accepted;
 // the condition is identified by DedupKey instead.
