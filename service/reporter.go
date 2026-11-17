@@ -911,7 +911,9 @@ func (r *Reporter) lookupFallbackAffected(ctx context.Context, incidentID string
 		return []string{}
 	}
 	defer func() {
-		_ = rows.Close()
+		if closeErr := rows.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close rows")
+		}
 	}()
 	var result []string
 	for rows.Next() {
@@ -919,6 +921,10 @@ func (r *Reporter) lookupFallbackAffected(ctx context.Context, incidentID string
 		if err := rows.Scan(&val); err == nil && val != "" {
 			result = append(result, val)
 		}
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		log.Error().Err(rowsErr).Msg("Failed iterating fallback affected rows")
+		return []string{}
 	}
 	return result
 }
