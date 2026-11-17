@@ -553,7 +553,9 @@ func onlyFields(fields []discordEmbedField, keep ...string) []discordEmbedField 
 // who needs to look further.
 func (r *Reporter) incidentHeadline(inc models.Incident, report models.Report) string {
 	parts := []string{severityColor(inc.Severity) + " **" + escapeDiscordMarkdown(inc.Title) + "**"}
-	parts = append(parts, "on **"+escapeDiscordMarkdown(affectedLabel(inc))+"**")
+	if affected := affectedLabel(inc); affected != "" {
+		parts = append(parts, "on **"+escapeDiscordMarkdown(affected)+"**")
+	}
 	// The severity word, not only the badge colour: a colour is the only
 	// carrier of "critical" otherwise, which is invisible to a colour-blind
 	// reader and ambiguous to everyone skimming.

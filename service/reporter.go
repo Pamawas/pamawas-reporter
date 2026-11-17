@@ -601,7 +601,11 @@ func inclusionReasonLabel(reason string) string {
 // an alert that names nothing must not look like it named something.
 func affectedLabel(inc models.Incident) string {
 	if len(inc.AffectedServices) == 0 {
-		return "unknown"
+		// Nothing to name. The headline already carries the alert's own title,
+		// so appending "on unknown" adds a word that looks like a rendering
+		// bug and tells the reader nothing. Callers omit the phrase entirely
+		// when this is empty.
+		return ""
 	}
 	return strings.Join(inc.AffectedServices, ", ")
 }
