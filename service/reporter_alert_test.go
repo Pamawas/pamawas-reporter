@@ -816,3 +816,55 @@ func TestEmDashesNeverReachACard(t *testing.T) {
 		t.Errorf("plainTypography left doubled commas: %q", got)
 	}
 }
+
+// TestSendVerifyReportDeliversTheWhy covers the stale-incident verification card.
+//
+// The correlator calls this after the investigator verifies an incident that
+// went silent past INCIDENT_STALE_AFTER. It must deliver the verdict and its
+// evidence — the "why" behind a close-or-keep-open decision.
+func TestSendVerifyReportDeliversTheWhy(t *testing.T) {
+	r, _, calls := newAlertTestReporter(t, "high")
+
+	resp, err := r.SendVerifyReport(context.Background(), models.VerifyReportPayload{
+		ContractVersion: 1,
+		IncidentID:      "inc_abc",
+		Verdict:         "still_down",
+		Title:           "Monitoring Target Down",
+		Severity:        "critical",
+		Target:          "koba-labs",
+		Reason:          "up is still 0; scrape_duration_seconds spiked to 30s.",
+		Findings: []models.Evidence{
+			{Type: "fact", Content: "up is 0 since 14:20.", Source: "prometheus", Confidence: 1.0},
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("SendVerifyReport error: %v", err)
+	}
+	if !resp.Sent {
+		t.Fatalf("expected the verification card to be sent, got %+v", resp)
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("delivery attempted %d times, want 1", got)
+	}
+}
+
+// TestSendVerifyReportRejectsABadVerdict pins the contract: only recovered and
+// still_down are valid verdicts.
+func TestSendVerifyReportRejectsABadVerdict(t *testing.T) {
+	r, _, calls := newAlertTestReporter(t, "high")
+
+	resp, err := r.SendVerifyReport(context.Background(), models.VerifyReportPayload{
+		IncidentID: "inc_abc",
+		Verdict:    "maybe",
+	})
+	if err != nil {
+		t.Fatalf("SendVerifyReport error: %v", err)
+	}
+	if !resp.Skipped || resp.Reason != "invalid_request" {
+		t.Fatalf("expected invalid_request skip, got %+v", resp)
+	}
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Fatalf("delivery attempted %d times for an invalid verdict, want 0", got)
+	}
+}
