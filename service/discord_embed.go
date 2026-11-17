@@ -1151,10 +1151,19 @@ func buildVerifyEmbed(payload models.VerifyReportPayload) discordEmbed {
 		discordMaxTitle,
 	)
 
+	// Colour follows the verdict, not the severity: a recovered incident is
+	// good news and must read green, even when the underlying condition was
+	// critical. A still_down card keeps the severity colour — the target is
+	// failing again, so the bar should still say how urgent it is.
+	color := severityEmbedColor(payload.Severity)
+	if payload.Verdict == "recovered" {
+		color = discordColorResolved
+	}
+
 	return discordEmbed{
 		Title:       escapeDiscordMarkdown(title),
 		Description: truncateRunes(description, discordMaxDescription),
-		Color:       severityEmbedColor(payload.Severity),
+		Color:       color,
 		Fields:      fields,
 		Footer: &discordEmbedFooter{
 			Text: truncateRunes("Incident: "+payload.IncidentID, discordMaxFooter),
