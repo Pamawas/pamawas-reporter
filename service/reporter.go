@@ -495,6 +495,21 @@ func (r *Reporter) generateReportContent(
 	fmt.Fprintf(&sb, "%d incidents occurred. %d need attention. %d resolved.\n\n",
 		totalIncidents, needsAttention, resolvedCount)
 
+	// Ask the investigator for a prose summary of the day. This is the only
+	// place the daily digest gets a narrative; without it the report is a bare
+	// incident list. Failure is non-fatal: summarizeDay returns "" and the
+	// deterministic sections still render.
+	if summary := r.summarizeDay(ctx, models.Report{
+		ReportType:  reportType,
+		PeriodStart: periodStart,
+		PeriodEnd:   periodEnd,
+		Timezone:    timezone,
+	}, incidents); summary != "" {
+		sb.WriteString("**Summary**\n")
+		sb.WriteString(summary)
+		sb.WriteString("\n\n")
+	}
+
 	// Split incidents into unresolved (needs attention) and solved sections
 	var unresolved, solved []models.Incident
 	for _, inc := range incidents {
