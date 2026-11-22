@@ -1103,6 +1103,17 @@ func alertFooter(alertKey string) *discordEmbedFooter {
 	}
 }
 
+func formatVerdict(verdict string) string {
+	switch strings.ToLower(strings.TrimSpace(verdict)) {
+	case "still_down":
+		return "Still Down"
+	case "recovered":
+		return "Recovered"
+	default:
+		return verdict
+	}
+}
+
 // buildVerifyEmbed renders a stale-incident verification outcome as a card.
 //
 // This is the "why" behind a close-or-keep-open decision. The correlator ran a
@@ -1115,6 +1126,8 @@ func buildVerifyEmbed(payload models.VerifyReportPayload) discordEmbed {
 		description = "No reason was recorded for this verification."
 	}
 
+	verdictLabel := formatVerdict(payload.Verdict)
+
 	fields := []discordEmbedField{}
 	if payload.Target != "" {
 		fields = append(fields, discordEmbedField{Name: "Target", Value: escapeDiscordMarkdown(payload.Target), Inline: true})
@@ -1125,7 +1138,7 @@ func buildVerifyEmbed(payload models.VerifyReportPayload) discordEmbed {
 	if payload.Environment != "" {
 		fields = append(fields, discordEmbedField{Name: "Environment", Value: escapeDiscordMarkdown(payload.Environment), Inline: true})
 	}
-	fields = append(fields, discordEmbedField{Name: "Verdict", Value: payload.Verdict, Inline: true})
+	fields = append(fields, discordEmbedField{Name: "Verdict", Value: verdictLabel, Inline: true})
 
 	// Each finding is one evidence line, so a reader sees the support behind
 	// the verdict without scrolling a wall of text.
@@ -1147,7 +1160,7 @@ func buildVerifyEmbed(payload models.VerifyReportPayload) discordEmbed {
 		verdictTitle = "✅"
 	}
 	title := truncateRunes(
-		fmt.Sprintf("%s Verification: %s — %s", verdictTitle, payload.Verdict, payload.Title),
+		fmt.Sprintf("%s Verification: %s • %s", verdictTitle, verdictLabel, payload.Title),
 		discordMaxTitle,
 	)
 
@@ -1176,9 +1189,10 @@ func buildVerifyEmbed(payload models.VerifyReportPayload) discordEmbed {
 // (Telegram, email).
 func formatVerifyMessage(payload models.VerifyReportPayload) string {
 	var sb strings.Builder
-	heading := "⚠️ *Verification: still down*"
+	verdictLabel := formatVerdict(payload.Verdict)
+	heading := "⚠️ *Verification: Still Down*"
 	if payload.Verdict == "recovered" {
-		heading = "✅ *Verification: recovered*"
+		heading = "✅ *Verification: Recovered*"
 	}
 	sb.WriteString(heading + "\n")
 	if payload.Title != "" {
@@ -1187,7 +1201,7 @@ func formatVerifyMessage(payload models.VerifyReportPayload) string {
 	if payload.Target != "" {
 		fmt.Fprintf(&sb, "Target: %s\n", payload.Target)
 	}
-	fmt.Fprintf(&sb, "Verdict: %s\n", payload.Verdict)
+	fmt.Fprintf(&sb, "Verdict: %s\n", verdictLabel)
 	sb.WriteString("Why: " + payload.Reason + "\n")
 	return sb.String()
 }

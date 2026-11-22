@@ -1871,7 +1871,7 @@ func (r *Reporter) SendVerifyReport(ctx context.Context, payload models.VerifyRe
 
 	content := alertContent{
 		Text:    formatVerifyMessage(payload),
-		Subject: "Verification: " + payload.Verdict + " — " + payload.Title,
+		Subject: "Verification: " + formatVerdict(payload.Verdict) + " • " + payload.Title,
 		Embed:   buildVerifyEmbed(payload),
 	}
 	sent, firstErr := r.deliverAlert(ctx, payload.IncidentID, content)
