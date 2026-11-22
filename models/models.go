@@ -73,6 +73,7 @@ type Incident struct {
 	ResolvedAt         time.Time `json:"resolved_at,omitempty"`
 	Severity           string    `json:"severity"`
 	Environment        string    `json:"environment"`
+	Target             string    `json:"target,omitempty"`
 	AffectedServices   []string  `json:"affected_services"`
 	CorrelationPolicy  string    `json:"correlation_policy"`
 	CorrelationVersion int       `json:"correlation_version"`

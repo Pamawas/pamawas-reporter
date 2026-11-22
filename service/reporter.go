@@ -868,6 +868,9 @@ func writeIncidentCardV2(sb *strings.Builder, inc models.Incident, evList []mode
 
 	fmt.Fprintf(sb, "%s **%s** (%s)%s\n", statusBadge, inc.Title, inc.Status, reasonLabel)
 	fmt.Fprintf(sb, "🔴 Severity: %s %s\n", sevBadge, inc.Severity)
+	if inc.Target != "" {
+		fmt.Fprintf(sb, "🎯 Target: %s\n", inc.Target)
+	}
 	fmt.Fprintf(sb, "🛠 Affected: %s\n", affectedLabel(inc))
 	fmt.Fprintf(sb, "🌍 Environment: %s\n", envLine)
 	fmt.Fprintf(sb, "🔗 Correlation: %s\n", corrLine)
@@ -944,6 +947,57 @@ func (r *Reporter) lookupFallbackAffected(ctx context.Context, incidentID string
 	return result
 }
 
+// loadIncidentTargets batch-resolves the primary concrete target (e.g. host instance, pod)
+// from the incident's underlying events.
+func (r *Reporter) loadIncidentTargets(ctx context.Context, incidentIDs []string) map[string]string {
+	targets := make(map[string]string)
+	if r.db == nil || len(incidentIDs) == 0 {
+		return targets
+	}
+	const query = `
+		SELECT DISTINCT ON (ie.incident_id)
+			ie.incident_id,
+			COALESCE(
+				NULLIF(e.labels->>'instance', ''),
+				NULLIF(e.labels->>'pod', ''),
+				NULLIF(e.labels->>'target', ''),
+				NULLIF(e.labels->>'container', ''),
+				NULLIF(e.labels->>'node', ''),
+				NULLIF(e.labels->>'host', ''),
+				''
+			) AS target
+		FROM incident_events ie
+		JOIN events e ON e.id = ie.event_id
+		WHERE ie.incident_id = ANY($1)
+		  AND (
+			(e.labels->>'instance' IS NOT NULL AND e.labels->>'instance' != '') OR
+			(e.labels->>'pod' IS NOT NULL AND e.labels->>'pod' != '') OR
+			(e.labels->>'target' IS NOT NULL AND e.labels->>'target' != '') OR
+			(e.labels->>'container' IS NOT NULL AND e.labels->>'container' != '') OR
+			(e.labels->>'node' IS NOT NULL AND e.labels->>'node' != '') OR
+			(e.labels->>'host' IS NOT NULL AND e.labels->>'host' != '')
+		  )
+		ORDER BY ie.incident_id, e.occurred_at DESC
+	`
+	rows, err := r.db.QueryContext(ctx, query, pq.Array(incidentIDs))
+	if err != nil {
+		log.Debug().Err(err).Msg("Failed querying incident targets")
+		return targets
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close rows")
+		}
+	}()
+	for rows.Next() {
+		var incID, target string
+		if err := rows.Scan(&incID, &target); err == nil && target != "" {
+			targets[incID] = target
+		}
+	}
+	return targets
+}
+
 // getIncidentsByIDs loads incident details by IDs
 func (r *Reporter) getIncidentsByIDs(ctx context.Context, incidentIDs []string) ([]models.Incident, error) {
 	if len(incidentIDs) == 0 {
@@ -993,7 +1047,20 @@ ORDER BY started_at DESC`
 		incidents = append(incidents, inc)
 	}
 
-	return incidents, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	targets := r.loadIncidentTargets(ctx, incidentIDs)
+	for i := range incidents {
+		if t, ok := targets[incidents[i].ID]; ok && t != "" {
+			incidents[i].Target = t
+		} else if len(incidents[i].AffectedServices) > 0 {
+			incidents[i].Target = incidents[i].AffectedServices[0]
+		}
+	}
+
+	return incidents, nil
 }
 
 // getAvailabilityMetric queries Prometheus for the configured availability

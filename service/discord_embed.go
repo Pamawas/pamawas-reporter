@@ -519,8 +519,8 @@ func (r *Reporter) buildSingleIncidentEmbed(report models.Report, inc models.Inc
 	// The headline above already states what is affected, how severe it is and
 	// how long it has been down, so those fields would repeat it in a second
 	// block below the findings. Keep only what the headline cannot carry:
-	// exact timestamps and the incident ID someone will paste into a search.
-	embed.Fields = onlyFields(embed.Fields, "Started", "Resolved", "Downtime", "Incident ID")
+	// concrete target entity, exact timestamps and the incident ID.
+	embed.Fields = onlyFields(embed.Fields, "Target", "Started", "Resolved", "Downtime", "Incident ID")
 	embed.Footer = reportFooter(report)
 	embed.Timestamp = report.GeneratedAt.UTC().Format(time.RFC3339)
 	return embed
@@ -553,7 +553,11 @@ func onlyFields(fields []discordEmbedField, keep ...string) []discordEmbedField 
 // who needs to look further.
 func (r *Reporter) incidentHeadline(inc models.Incident, report models.Report) string {
 	parts := []string{severityColor(inc.Severity) + " **" + escapeDiscordMarkdown(inc.Title) + "**"}
-	if affected := affectedLabel(inc); affected != "" {
+	if inc.Target != "" && inc.Target != affectedLabel(inc) && affectedLabel(inc) != "" {
+		parts = append(parts, "on **"+escapeDiscordMarkdown(inc.Target)+"** ("+escapeDiscordMarkdown(affectedLabel(inc))+")")
+	} else if inc.Target != "" {
+		parts = append(parts, "on **"+escapeDiscordMarkdown(inc.Target)+"**")
+	} else if affected := affectedLabel(inc); affected != "" {
 		parts = append(parts, "on **"+escapeDiscordMarkdown(affected)+"**")
 	}
 	// The severity word, not only the badge colour: a colour is the only
@@ -749,6 +753,9 @@ func buildIncidentEmbed(report models.Report, inc models.Incident, evList []mode
 	}
 	if environment := inc.Environment; environment != "" {
 		fields = append(fields, discordEmbedField{Name: "Environment", Value: environment, Inline: true})
+	}
+	if inc.Target != "" {
+		fields = append(fields, discordEmbedField{Name: "Target", Value: escapeDiscordMarkdown(inc.Target), Inline: true})
 	}
 	fields = append(fields, discordEmbedField{Name: "Affected", Value: affectedLabel(inc), Inline: false})
 

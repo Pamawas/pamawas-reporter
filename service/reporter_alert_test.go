@@ -779,6 +779,43 @@ func TestSingleIncidentCardLeadsWithWhatIsDown(t *testing.T) {
 	}
 }
 
+func TestSingleIncidentEmbedIncludesTarget(t *testing.T) {
+	inc := models.Incident{
+		ID:               "inc_target_test",
+		Title:            "CPU",
+		Status:           "open",
+		Severity:         "warning",
+		Environment:      "production",
+		Target:           "last-labs",
+		AffectedServices: []string{"system_node"},
+		StartedAt:        time.Now().Add(-10 * time.Minute),
+	}
+	r := &Reporter{}
+	card := r.buildSingleIncidentEmbed(
+		models.Report{ReportType: "high_severity", Timezone: "UTC", GeneratedAt: time.Now()},
+		inc,
+		nil,
+		"newly_started",
+	)
+
+	// Headline must show both target and service when target differs
+	if !strings.Contains(card.Description, "last-labs") || !strings.Contains(card.Description, "system\\_node") {
+		t.Errorf("headline must state both target and service, got %q", card.Description)
+	}
+
+	// Target field must be present
+	foundTarget := false
+	for _, f := range card.Fields {
+		if f.Name == "Target" && f.Value == "last-labs" {
+			foundTarget = true
+			break
+		}
+	}
+	if !foundTarget {
+		t.Errorf("expected Target field in card.Fields, got %+v", card.Fields)
+	}
+}
+
 func TestFormatElapsedReadsLikeATriageClock(t *testing.T) {
 	cases := map[time.Duration]string{
 		5 * time.Second:                "5s",
