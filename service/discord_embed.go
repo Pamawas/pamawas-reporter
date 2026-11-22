@@ -742,6 +742,9 @@ func buildIncidentEmbed(report models.Report, inc models.Incident, evList []mode
 	// said where it came from. Status stays in the Status field and the bar
 	// colour, so the title is free to carry provenance.
 	title := fmt.Sprintf("%s · %s", reportLabel(report), escapeDiscordMarkdown(inc.Title))
+	if inc.Target != "" {
+		title += " • " + escapeDiscordMarkdown(inc.Target)
+	}
 
 	// Only fields that carry information are shown. A field reading "unknown"
 	// looks like a fact the investigation established; the truth is that the
@@ -1088,8 +1091,13 @@ func buildAlertEmbed(subject alertSubject) discordEmbed {
 		description = recurrence + "\n\n" + description
 	}
 
+	title := "🚨 Firing • " + escapeDiscordMarkdown(subject.Title)
+	if subject.Target != "" {
+		title += " • " + escapeDiscordMarkdown(subject.Target)
+	}
+
 	return discordEmbed{
-		Title:       truncateRunes("🚨 "+escapeDiscordMarkdown(subject.Title), discordMaxTitle),
+		Title:       truncateRunes(title, discordMaxTitle),
 		Description: truncateRunes(description, discordMaxDescription),
 		Color:       severityEmbedColor(subject.Severity),
 		Fields:      fields,
@@ -1166,8 +1174,12 @@ func buildVerifyEmbed(payload models.VerifyReportPayload) discordEmbed {
 	if payload.Verdict == "recovered" {
 		verdictTitle = "✅"
 	}
+	titleStr := fmt.Sprintf("%s Verification: %s • %s", verdictTitle, verdictLabel, payload.Title)
+	if payload.Target != "" {
+		titleStr += " • " + payload.Target
+	}
 	title := truncateRunes(
-		fmt.Sprintf("%s Verification: %s • %s", verdictTitle, verdictLabel, payload.Title),
+		titleStr,
 		discordMaxTitle,
 	)
 
@@ -1261,8 +1273,13 @@ func buildResolvedAlertEmbed(subject alertSubject, resolvedAt time.Time, inciden
 	}
 	fields = trimAlertFields(fields)
 
+	title := "✅ Resolved • " + escapeDiscordMarkdown(subject.Title)
+	if subject.Target != "" {
+		title += " • " + escapeDiscordMarkdown(subject.Target)
+	}
+
 	embed := discordEmbed{
-		Title:       truncateRunes("✅ "+escapeDiscordMarkdown(subject.Title), discordMaxTitle),
+		Title:       truncateRunes(title, discordMaxTitle),
 		Description: truncateRunes(description, discordMaxDescription),
 		Color:       discordColorResolved,
 		Fields:      fields,
