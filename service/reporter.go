@@ -995,6 +995,9 @@ func (r *Reporter) loadIncidentTargets(ctx context.Context, incidentIDs []string
 			targets[incID] = target
 		}
 	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		log.Error().Err(rowsErr).Msg("Failed iterating incident target rows")
+	}
 	return targets
 }
 
