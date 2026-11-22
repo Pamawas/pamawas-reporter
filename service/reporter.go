@@ -1212,6 +1212,9 @@ func (r *Reporter) deliverChannel(ctx context.Context, report models.Report, cha
 			log.Warn().Str("channel", channel).Str("report_id", report.ID).
 				Msg("Circuit breaker open, skipping delivery attempt")
 			r.metrics.DeliveryTotal.WithLabelValues(channel, "circuit_open").Inc()
+			if attemptID, claimErr := r.claimDeliveryAttempt(ctx, report.ID, channel, destinationKey); claimErr == nil {
+				_ = r.updateDeliveryAttemptStatus(ctx, attemptID, models.DeliveryStatusFailedTerminal, attempt, "circuit_open", nil)
+			}
 			return
 		}
 
@@ -2289,6 +2292,18 @@ func (r *Reporter) RecoverStalledDeliveries(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+
+	// Also mark abandoned pending delivery attempts older than 24 hours as failed_terminal
+	// so leaked un-claimed attempts don't remain pending indefinitely.
+	_, _ = r.db.ExecContext(ctx, `
+		UPDATE delivery_attempts
+		SET status = 'failed_terminal',
+		    safe_error_code = 'expired_pending',
+		    updated_at = now()
+		WHERE status = 'pending'
+		  AND created_at < now() - interval '24 hours'
+	`)
+
 	if count > 0 {
 		r.metrics.StalledDeliveriesTotal.Add(float64(count))
 		log.Info().Int64("recovered", count).Msg("Recovered stalled delivery attempts")
