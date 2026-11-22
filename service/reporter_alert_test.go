@@ -453,6 +453,9 @@ func TestResolvedCardFoldsDowntimeIntoTheSummary(t *testing.T) {
 			t.Error("downtime must not be a field; it wraps alone onto its own row")
 		}
 	}
+	if embed.Title != "✅ Resolved • Monitoring Target Down • last-labs" {
+		t.Errorf("expected title with target, got %q", embed.Title)
+	}
 	// 5 identity fields + Resolved = two full rows of three.
 	if len(embed.Fields) != 6 {
 		t.Errorf("expected 6 fields for a clean grid, got %d: %+v", len(embed.Fields), embed.Fields)
@@ -468,6 +471,10 @@ func TestFiringCardStatesFiringDuration(t *testing.T) {
 		Target: "last-labs", Job: "docker_cadvisor",
 		StartedAt: time.Now().Add(-12 * time.Minute),
 	})
+
+	if embed.Title != "🚨 Firing • Monitoring Target Down • last-labs" {
+		t.Errorf("expected title with target, got %q", embed.Title)
+	}
 
 	var firingFor string
 	for _, f := range embed.Fields {
