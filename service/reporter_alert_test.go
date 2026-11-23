@@ -823,6 +823,36 @@ func TestSingleIncidentEmbedIncludesTarget(t *testing.T) {
 	}
 }
 
+func TestHighSeverityReportUsesConfiguredTimezone(t *testing.T) {
+	started := time.Date(2026, 11, 23, 11, 35, 10, 0, time.UTC)
+	resolved := time.Date(2026, 11, 23, 11, 40, 10, 0, time.UTC)
+	generated := time.Date(2026, 11, 23, 11, 47, 28, 0, time.UTC)
+	inc := models.Incident{
+		ID: "inc_timezone", Title: "CPU", Status: "resolved", Severity: "warning",
+		Target: "koba-labs", StartedAt: started, ResolvedAt: resolved,
+	}
+	report := models.Report{
+		ReportType: "high_severity", Timezone: "Asia/Jakarta",
+		TemplateVersion: "pamawas-report-v2", GeneratedAt: generated,
+	}
+
+	card := (&Reporter{}).buildSingleIncidentEmbed(report, inc, nil, "resolved_during_period")
+	fields := make(map[string]string, len(card.Fields))
+	for _, field := range card.Fields {
+		fields[field.Name] = field.Value
+	}
+
+	if fields["Started"] != "2026-11-23 18:35:10 WIB" {
+		t.Errorf("started time must use report timezone, got %q", fields["Started"])
+	}
+	if fields["Resolved"] != "2026-11-23 18:40:10 WIB" {
+		t.Errorf("resolved time must use report timezone, got %q", fields["Resolved"])
+	}
+	if card.Footer == nil || !strings.Contains(card.Footer.Text, "2026-11-23 18:47:28 WIB") {
+		t.Errorf("generated time must use report timezone, got %+v", card.Footer)
+	}
+}
+
 func TestFormatElapsedReadsLikeATriageClock(t *testing.T) {
 	cases := map[time.Duration]string{
 		5 * time.Second:                "5s",

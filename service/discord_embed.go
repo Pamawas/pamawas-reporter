@@ -721,10 +721,11 @@ func (r *Reporter) reportHeader(ctx context.Context, report models.Report, incid
 
 // reportFooter records which template produced the report and when.
 func reportFooter(report models.Report) *discordEmbedFooter {
+	loc := loadLocation(report.Timezone)
 	return &discordEmbedFooter{
 		Text: truncateRunes(fmt.Sprintf("Template: %s · Generated: %s",
 			report.TemplateVersion,
-			report.GeneratedAt.UTC().Format("2006-01-02 15:04:05 UTC")), discordMaxFooter),
+			report.GeneratedAt.In(loc).Format("2006-01-02 15:04:05 MST")), discordMaxFooter),
 	}
 }
 
