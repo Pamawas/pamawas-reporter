@@ -378,6 +378,26 @@ func TestSingleIncidentCardReadsCauseThenActionsThenEvidence(t *testing.T) {
 
 // buildSingleIncidentEmbedForTest adapts the method for tests that do not need
 // a database-backed reporter.
+func TestPartialInvestigationCardShowsCauseAssessmentAndActions(t *testing.T) {
+	embed := buildSingleIncidentEmbedForTest(models.Incident{
+		ID: "inc_partial", Title: "CPU", Status: "resolved", Severity: "warning",
+		StartedAt: time.Now().Add(-time.Hour),
+	}, []models.Evidence{
+		{ID: "fact", Type: "fact", Content: "CPU rate increased", Source: "prometheus", Confidence: 1},
+		{ID: "cause", Type: "unknown", Content: "Root cause is unconfirmed.", Source: "system", SourceDetail: "causal-verdict enforcement"},
+		{ID: "action", Type: "recommendation", Content: "Inspect the changing workload", Source: "system", Confidence: 1},
+	})
+	causeAt := strings.Index(embed.Description, "Cause assessment")
+	actionAt := strings.Index(embed.Description, "Suggested actions")
+	evidenceAt := strings.Index(embed.Description, "Supporting evidence")
+	if causeAt < 0 || actionAt <= causeAt || evidenceAt <= actionAt {
+		t.Fatalf("missing or misplaced partial-report sections: %s", embed.Description)
+	}
+	if strings.Contains(embed.Description, "Likely cause") {
+		t.Fatal("unconfirmed root cause must not be presented as likely")
+	}
+}
+
 func buildSingleIncidentEmbedForTest(inc models.Incident, evList []models.Evidence) discordEmbed {
 	r := &Reporter{config: ReporterConfig{HighSeverityThreshold: "high"}}
 	report := models.Report{TemplateVersion: "pamawas-report-v2", GeneratedAt: time.Now()}

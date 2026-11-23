@@ -492,6 +492,8 @@ func (r *Reporter) buildSingleIncidentEmbed(report models.Report, inc models.Inc
 		// the evidence supports.
 		if cause.Type == "hypothesis" {
 			fmt.Fprintf(&sb, "\n**💭 Possible cause** _(hypothesis, %.0f%% confidence, not confirmed)_\n", cause.Confidence*100)
+		} else if cause.Type == "unknown" {
+			sb.WriteString("\n**❓ Cause assessment** _(unconfirmed)_\n")
 		} else {
 			sb.WriteString("\n**🎯 Likely cause**\n")
 		}
@@ -616,7 +618,7 @@ func formatElapsed(d time.Duration) string {
 // used only when the investigation reached no likely cause, and is labelled as
 // such by its own type line.
 func triageFindings(evList []models.Evidence) (cause *models.Evidence, actions, evidence []models.Evidence) {
-	var likely, hypotheses []models.Evidence
+	var likely, hypotheses, unknownCauses []models.Evidence
 	for i := range evList {
 		ev := evList[i]
 		switch ev.Type {
@@ -626,6 +628,12 @@ func triageFindings(evList []models.Evidence) (cause *models.Evidence, actions, 
 			likely = append(likely, ev)
 		case "hypothesis":
 			hypotheses = append(hypotheses, ev)
+		case "unknown":
+			if ev.SourceDetail == "causal-verdict enforcement" || strings.HasPrefix(strings.ToLower(ev.Content), "root cause") {
+				unknownCauses = append(unknownCauses, ev)
+			} else {
+				evidence = append(evidence, ev)
+			}
 		default:
 			evidence = append(evidence, ev)
 		}
@@ -640,6 +648,9 @@ func triageFindings(evList []models.Evidence) (cause *models.Evidence, actions, 
 		best := mostConfident(hypotheses)
 		cause = &best
 		evidence = append(evidence, remaining(hypotheses, best)...)
+	case len(unknownCauses) > 0:
+		best := unknownCauses[0]
+		cause = &best
 	}
 	return cause, actions, evidence
 }
