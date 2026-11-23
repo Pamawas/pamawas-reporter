@@ -296,11 +296,14 @@ func TestFindingsCiteTheirSourceAndSeparateActions(t *testing.T) {
 	// Underscores are escaped: Discord treats a bare one as an italic
 	// delimiter, which deletes the character and italicises the rest of the
 	// line. `node_load1` reached the reader as "node" followed by italic "load1".
-	if !strings.Contains(out, `Prometheus: node\_load1{instance="koba-labs"}`) {
-		t.Errorf("metric finding must cite Prometheus and the query, got:\n%s", out)
+	if !strings.Contains(out, `_[Prometheus]_`) {
+		t.Errorf("metric finding must identify Prometheus, got:\n%s", out)
 	}
-	if !strings.Contains(out, `Loki: kubernetes\_container\_name=netbird-agent`) {
-		t.Errorf("log finding must cite Loki and the stream, got:\n%s", out)
+	if !strings.Contains(out, `_[Loki]_`) {
+		t.Errorf("log finding must identify Loki, got:\n%s", out)
+	}
+	if strings.Contains(out, `{instance=`) || strings.Contains(out, "kubernetes\\_container\\_name=") {
+		t.Errorf("audit selectors must not appear in reader-facing evidence:\n%s", out)
 	}
 	if !strings.Contains(out, "_[inferred]_") {
 		t.Errorf("synthesized finding must be marked as inference, got:\n%s", out)
@@ -737,12 +740,12 @@ func TestEvidenceUnderscoresAreEscaped(t *testing.T) {
 	if strings.Contains(out, "symptom_keywords") {
 		t.Errorf("an unescaped underscore survived and would be eaten by Discord:\n%s", out)
 	}
-	if !strings.Contains(out, `symptom\_keywords`) {
-		t.Errorf("underscore must be escaped:\n%s", out)
+	if strings.Contains(out, `symptom\_keywords`) {
+		t.Errorf("audit tool arguments must not be printed in report prose:\n%s", out)
 	}
 	// The italic marker this package emits must survive so the suffix still
 	// renders as a citation rather than as literal punctuation.
-	if !strings.Contains(out, " _[incident history:") || !strings.HasSuffix(strings.TrimSpace(out), "]_") {
+	if !strings.Contains(out, " _[incident history]_") || !strings.HasSuffix(strings.TrimSpace(out), "]_") {
 		t.Errorf("source citation must keep its italic markers:\n%s", out)
 	}
 }

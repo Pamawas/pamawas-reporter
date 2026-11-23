@@ -509,8 +509,8 @@ func (r *Reporter) buildSingleIncidentEmbed(report models.Report, inc models.Inc
 	if len(evidence) > 0 {
 		sb.WriteString("\n**📋 Supporting evidence**\n")
 		for _, ev := range evidence {
-			fmt.Fprintf(&sb, "%s **%s** (%.0f%%) %s%s\n",
-				evidenceIcon(ev.Type), strings.ToUpper(ev.Type), ev.Confidence*100,
+			fmt.Fprintf(&sb, "%s %s%s\n",
+				evidenceIcon(ev.Type),
 				clipSentence(ev.Content, cardEvidenceLimit), evidenceSourceSuffix(ev))
 		}
 	}

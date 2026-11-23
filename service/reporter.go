@@ -670,15 +670,12 @@ func writeRecommendations(sb *strings.Builder, evList []models.Evidence) {
 	}
 }
 
-// evidenceSourceSuffix renders where a finding came from, so a reader can tell
-// a metric from a log from the model's own inference.
+// evidenceSourceSuffix identifies provenance. Exact queries and selectors stay
+// in evidence.source_detail and tool_executions for audit, not in report prose.
 func evidenceSourceSuffix(ev models.Evidence) string {
 	label := evidenceSourceLabel(ev.Source)
 	if label == "" {
 		return ""
-	}
-	if ev.SourceDetail != "" {
-		return fmt.Sprintf(" _[%s: %s]_", label, escapeDiscordMarkdown(ev.SourceDetail))
 	}
 	return fmt.Sprintf(" _[%s]_", label)
 }
