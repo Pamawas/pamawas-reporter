@@ -490,11 +490,12 @@ func (r *Reporter) buildSingleIncidentEmbed(report models.Report, inc models.Inc
 		// admitting it did not converge, and presenting that under "Likely
 		// cause" with no qualifier told a paged engineer the opposite of what
 		// the evidence supports.
-		if cause.Type == "hypothesis" {
+		switch cause.Type {
+		case "hypothesis":
 			fmt.Fprintf(&sb, "\n**💭 Possible cause** _(hypothesis, %.0f%% confidence, not confirmed)_\n", cause.Confidence*100)
-		} else if cause.Type == "unknown" {
+		case "unknown":
 			sb.WriteString("\n**❓ Cause assessment** _(unconfirmed)_\n")
-		} else {
+		default:
 			sb.WriteString("\n**🎯 Likely cause**\n")
 		}
 		fmt.Fprintf(&sb, "%s%s\n", clipSentence(cause.Content, cardCauseLimit), evidenceSourceSuffix(*cause))
