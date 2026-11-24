@@ -28,7 +28,7 @@ import (
 
 const (
 	// ReportPolicyVersion is the version of the report policy for idempotency
-	ReportPolicyVersion = 1
+	ReportPolicyVersion = 2
 
 	// DefaultTimezone is the default IANA timezone for daily reports
 	DefaultTimezone = "Asia/Jakarta"
@@ -154,10 +154,16 @@ func (r *Reporter) ProcessReportRequest(ctx context.Context, payload models.Repo
 		return nil, fmt.Errorf("unknown report type: %s", payload.ReportType)
 	}
 
-	// Load evidence for all selected incidents. The scheduler dispatches high-severity
-	// report requests only after investigations reach a terminal state, so the reporter
-	// does not block waiting for investigation completion here.
-	incidentEvidence, err := r.loadEvidenceForIncidents(ctx, incidentIDs)
+	// Freeze one full-investigation run per incident before rendering. The same
+	// snapshot timestamp is stored on the report and each selected run ID is
+	// persisted in report_incidents, so a verification finishing concurrently
+	// cannot replace or mix with the investigation evidence in this report.
+	snapshotAt := time.Now()
+	selectedRuns, err := r.selectInvestigationRuns(ctx, incidentIDs, snapshotAt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to select investigation runs: %w", err)
+	}
+	incidentEvidence, err := r.loadEvidenceForRuns(ctx, selectedRuns)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to load evidence for incidents")
 		// Continue with empty evidence rather than failing
@@ -165,7 +171,7 @@ func (r *Reporter) ProcessReportRequest(ctx context.Context, payload models.Repo
 	}
 
 	// Generate report content
-	reportContent, err := r.generateReportContent(ctx, payload.ReportType, periodStart, periodEnd, payload.Timezone, incidentIDs, incidentEvidence, inclusionReasons)
+	reportContent, err := r.generateReportContent(ctx, payload.ReportType, periodStart, periodEnd, payload.Timezone, incidentIDs, incidentEvidence, inclusionReasons, snapshotAt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate report content: %w", err)
 	}
@@ -180,13 +186,13 @@ func (r *Reporter) ProcessReportRequest(ctx context.Context, payload models.Repo
 		Timezone:        payload.Timezone,
 		TemplateVersion: fmt.Sprintf("pamawas-report-%s", r.config.ReportTemplate),
 		Content:         reportContent,
-		GeneratedAt:     time.Now(),
+		GeneratedAt:     snapshotAt,
 		Status:          models.ReportStatusGenerated,
-		CreatedAt:       time.Now(),
+		CreatedAt:       snapshotAt,
 	}
 
 	// Persist report and report_incidents transactionally
-	if err := r.persistReportWithIncidents(ctx, report, incidentIDs, inclusionReasons); err != nil {
+	if err := r.persistReportWithIncidents(ctx, report, incidentIDs, inclusionReasons, selectedRuns); err != nil {
 		return nil, fmt.Errorf("failed to persist report: %w", err)
 	}
 
@@ -305,21 +311,23 @@ func (r *Reporter) selectDailyIncidents(ctx context.Context, periodStart, period
 	return incidentIDs, inclusionReasons, rows.Err()
 }
 
-// loadEvidenceForIncidents loads the latest terminal investigation evidence for each incident
-func (r *Reporter) loadEvidenceForIncidents(ctx context.Context, incidentIDs []string) (map[string][]models.Evidence, error) {
+// selectInvestigationRuns pins the newest completed full investigation at or
+// before snapshotAt. Verification runs are intentionally excluded.
+func (r *Reporter) selectInvestigationRuns(ctx context.Context, incidentIDs []string, snapshotAt time.Time) (map[string]string, error) {
 	if len(incidentIDs) == 0 {
-		return make(map[string][]models.Evidence), nil
+		return make(map[string]string), nil
 	}
 
-	const query = `SELECT e.id, e.incident_id, e.type, e.content, e.source, e.source_detail,
-       e.confidence, e.supports_evidence, e.contradicts_evidence, e.ordinal
-FROM evidence e
-JOIN investigation_runs ir ON e.run_id = ir.id
-WHERE e.incident_id = ANY($1)
-  AND ir.status = 'completed'
-ORDER BY e.incident_id, ir.completed_at DESC, e.ordinal`
-
-	rows, err := r.db.QueryContext(ctx, query, pq.Array(incidentIDs))
+	const query = `
+		SELECT DISTINCT ON (incident_id) incident_id, id
+		FROM investigation_runs
+		WHERE incident_id = ANY($1)
+		  AND run_kind = 'investigation'
+		  AND status = 'completed'
+		  AND completed_at <= $2
+		ORDER BY incident_id, completed_at DESC, created_at DESC
+	`
+	rows, err := r.db.QueryContext(ctx, query, pq.Array(incidentIDs), snapshotAt)
 	if err != nil {
 		return nil, err
 	}
@@ -329,37 +337,108 @@ ORDER BY e.incident_id, ir.completed_at DESC, e.ordinal`
 		}
 	}()
 
+	selected := make(map[string]string)
+	for rows.Next() {
+		var incidentID, runID string
+		if err := rows.Scan(&incidentID, &runID); err != nil {
+			return nil, err
+		}
+		selected[incidentID] = runID
+	}
+	return selected, rows.Err()
+}
+
+// loadEvidenceForRuns loads evidence only from the explicitly selected run for
+// each incident. It cannot merge rows from older investigations or verification.
+func (r *Reporter) loadEvidenceForRuns(ctx context.Context, selectedRuns map[string]string) (map[string][]models.Evidence, error) {
 	incidentEvidence := make(map[string][]models.Evidence)
-	seenIncidents := make(map[string]bool)
+	if len(selectedRuns) == 0 {
+		return incidentEvidence, nil
+	}
+	runIDs := make([]string, 0, len(selectedRuns))
+	for _, runID := range selectedRuns {
+		if runID != "" {
+			runIDs = append(runIDs, runID)
+		}
+	}
+	if len(runIDs) == 0 {
+		return incidentEvidence, nil
+	}
+
+	const query = `SELECT e.id, e.incident_id, e.run_id, e.type, e.content, e.source, e.source_detail,
+       e.confidence, e.supports_evidence, e.contradicts_evidence, e.ordinal
+FROM evidence e
+WHERE e.run_id = ANY($1)
+ORDER BY e.incident_id, e.ordinal`
+
+	rows, err := r.db.QueryContext(ctx, query, pq.Array(runIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close rows")
+		}
+	}()
 
 	for rows.Next() {
 		var ev models.Evidence
-		var supportsJSON, contradictsJSON []byte
 		var incidentID string
 
 		if err := rows.Scan(
-			&ev.ID, &incidentID, &ev.Type, &ev.Content, &ev.Source, &ev.SourceDetail,
-			&ev.Confidence, &supportsJSON, &contradictsJSON, &ev.Ordinal,
+			&ev.ID, &incidentID, &ev.RunID, &ev.Type, &ev.Content, &ev.Source, &ev.SourceDetail,
+			&ev.Confidence, pq.Array(&ev.Supports), pq.Array(&ev.Contradicts), &ev.Ordinal,
 		); err != nil {
 			return nil, err
 		}
-
-		if err := json.Unmarshal(supportsJSON, &ev.Supports); err != nil {
-			ev.Supports = []string{}
-		}
-		if err := json.Unmarshal(contradictsJSON, &ev.Contradicts); err != nil {
-			ev.Contradicts = []string{}
-		}
-
-		// Only take evidence from the latest completed run per incident
-		if !seenIncidents[incidentID] {
-			seenIncidents[incidentID] = true
-			incidentEvidence[incidentID] = []models.Evidence{}
-		}
+		ev.IncidentID = incidentID
 		incidentEvidence[incidentID] = append(incidentEvidence[incidentID], ev)
 	}
 
 	return incidentEvidence, rows.Err()
+}
+
+// loadEvidenceForIncidents is the on-demand/latest-full wrapper. Report
+// generation uses the snapshot-aware selection above and persists those IDs.
+func (r *Reporter) loadEvidenceForIncidents(ctx context.Context, incidentIDs []string) (map[string][]models.Evidence, error) {
+	selected, err := r.selectInvestigationRuns(ctx, incidentIDs, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	return r.loadEvidenceForRuns(ctx, selected)
+}
+
+// loadEvidenceForReport reuses the immutable run selections persisted with a
+// report. Delivery retries therefore render the same findings as generation,
+// even when newer investigations finish before a channel retry succeeds.
+func (r *Reporter) loadEvidenceForReport(ctx context.Context, reportID string) (map[string][]models.Evidence, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT incident_id, run_id
+		FROM report_incidents
+		WHERE report_id = $1
+		  AND run_id IS NOT NULL
+	`, reportID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			log.Error().Err(closeErr).Msg("Failed to close rows")
+		}
+	}()
+
+	selected := make(map[string]string)
+	for rows.Next() {
+		var incidentID, runID string
+		if err := rows.Scan(&incidentID, &runID); err != nil {
+			return nil, err
+		}
+		selected[incidentID] = runID
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return r.loadEvidenceForRuns(ctx, selected)
 }
 
 // LoadIncidentFindings returns one incident's investigation findings on demand.
@@ -410,6 +489,7 @@ func (r *Reporter) LoadIncidentFindings(ctx context.Context, incidentID string) 
 		SELECT id, status, started_at, completed_at
 		FROM investigation_runs
 		WHERE incident_id = $1
+		  AND run_kind = 'investigation'
 		ORDER BY created_at DESC
 		LIMIT 1
 	`
@@ -435,12 +515,16 @@ func (r *Reporter) LoadIncidentFindings(ctx context.Context, incidentID string) 
 		out.Run = &run
 	}
 
-	evidence, err := r.loadEvidenceForIncidents(ctx, []string{incidentID})
-	if err != nil {
-		return out, err
-	}
-	if evList, ok := evidence[incidentID]; ok {
-		out.Findings = evList
+	if out.Run != nil && out.Run.Status == "completed" {
+		evidence, err := r.loadEvidenceForRuns(
+			ctx, map[string]string{incidentID: out.Run.ID},
+		)
+		if err != nil {
+			return out, err
+		}
+		if evList, ok := evidence[incidentID]; ok {
+			out.Findings = evList
+		}
 	}
 
 	// Reuse the same triage the cards use, so what a reader sees on demand
@@ -468,6 +552,7 @@ func (r *Reporter) generateReportContent(
 	incidentIDs []string,
 	incidentEvidence map[string][]models.Evidence,
 	inclusionReasons map[string]string,
+	generatedAt time.Time,
 ) (string, error) {
 
 	// Load incident details
@@ -528,21 +613,22 @@ func (r *Reporter) generateReportContent(
 		writeIncidentDetails(&sb, unresolved, solved, incidentEvidence, inclusionReasons)
 	}
 
-	fmt.Fprintf(&sb, "---\nTemplate: pamawas-report-%s | Generated: %s\n", r.config.ReportTemplate, time.Now().UTC().Format("2006-01-02 15:04:05 UTC"))
+	fmt.Fprintf(&sb, "---\nTemplate: pamawas-report-%s | Generated: %s\n", r.config.ReportTemplate, generatedAt.In(loadLocation(timezone)).Format("2006-01-02 15:04:05 MST"))
 
 	return sb.String(), nil
 }
 
 // writeReportHeader writes the report title and period header based on type.
 func writeReportHeader(sb *strings.Builder, reportType string, periodStart, periodEnd time.Time, timezone string) {
-	utcStart := periodStart.In(time.UTC).Format("2006-01-02 15:04:05 UTC")
-	utcEnd := periodEnd.In(time.UTC).Format("2006-01-02 15:04:05 UTC")
+	loc := loadLocation(timezone)
+	localStart := periodStart.In(loc).Format("2006-01-02 15:04:05 MST")
+	localEnd := periodEnd.In(loc).Format("2006-01-02 15:04:05 MST")
 	if reportType == "daily" {
 		fmt.Fprintf(sb, "📅 Daily Infrastructure Report\n")
-		fmt.Fprintf(sb, "Period: %s to %s (%s)\n\n", utcStart, utcEnd, timezone)
+		fmt.Fprintf(sb, "Period: %s to %s (%s)\n\n", localStart, localEnd, timezone)
 	} else {
 		fmt.Fprintf(sb, "🚨 High Severity Immediate Report\n")
-		fmt.Fprintf(sb, "Period: %s to %s (UTC)\n\n", utcStart, utcEnd)
+		fmt.Fprintf(sb, "Period: %s to %s (%s)\n\n", localStart, localEnd, timezone)
 	}
 }
 
@@ -1154,7 +1240,7 @@ func (r *Reporter) getAvailabilityMetric(ctx context.Context, periodStart, perio
 }
 
 // persistReportWithIncidents persists the report and report_incidents in a transaction
-func (r *Reporter) persistReportWithIncidents(ctx context.Context, report models.Report, incidentIDs []string, inclusionReasons map[string]string) error {
+func (r *Reporter) persistReportWithIncidents(ctx context.Context, report models.Report, incidentIDs []string, inclusionReasons map[string]string, selectedRuns map[string]string) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -1183,10 +1269,14 @@ func (r *Reporter) persistReportWithIncidents(ctx context.Context, report models
 		if reason == "" {
 			reason = models.InclusionReasonOngoing
 		}
+		var runID any
+		if selected := selectedRuns[incidentID]; selected != "" {
+			runID = selected
+		}
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO report_incidents (report_id, incident_id, inclusion_reason)
-			VALUES ($1, $2, $3)
-		`, report.ID, incidentID, reason)
+			INSERT INTO report_incidents (report_id, incident_id, inclusion_reason, run_id)
+			VALUES ($1, $2, $3, $4)
+		`, report.ID, incidentID, reason, runID)
 		if err != nil {
 			return err
 		}

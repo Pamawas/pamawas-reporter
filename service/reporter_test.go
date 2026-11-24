@@ -79,6 +79,9 @@ func TestSendToDiscord(t *testing.T) {
 	mock.ExpectQuery("SELECT ri.incident_id, ri.inclusion_reason").
 		WithArgs("rpt-1").
 		WillReturnRows(sqlmock.NewRows([]string{"incident_id", "inclusion_reason"}))
+	mock.ExpectQuery("SELECT incident_id, run_id").
+		WithArgs("rpt-1").
+		WillReturnRows(sqlmock.NewRows([]string{"incident_id", "run_id"}))
 	if err := r.sendToDiscord(context.Background(), models.Report{ID: "rpt-1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +98,9 @@ func TestSendToDiscordReturnsStatusError(t *testing.T) {
 	mock.ExpectQuery("SELECT ri.incident_id, ri.inclusion_reason").
 		WithArgs("rpt-1").
 		WillReturnRows(sqlmock.NewRows([]string{"incident_id", "inclusion_reason"}))
+	mock.ExpectQuery("SELECT incident_id, run_id").
+		WithArgs("rpt-1").
+		WillReturnRows(sqlmock.NewRows([]string{"incident_id", "run_id"}))
 	if err := r.sendToDiscord(context.Background(), models.Report{ID: "rpt-1"}); err == nil || !strings.Contains(err.Error(), "502") {
 		t.Fatalf("error = %v", err)
 	}
@@ -148,13 +154,13 @@ func TestLoadIncidentFindingsReturnsCauseAndActions(t *testing.T) {
 
 	mock.ExpectQuery("FROM evidence e").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "incident_id", "type", "content", "source", "source_detail",
+			"id", "incident_id", "run_id", "type", "content", "source", "source_detail",
 			"confidence", "supports_evidence", "contradicts_evidence", "ordinal",
 		}).
-			AddRow("ev_1", "inc_1", "likely_cause", "netbird tunnel dropped", "llm",
-				"prometheus up + loki docker_logs", 0.85, []byte("[]"), []byte("[]"), 0).
-			AddRow("ev_2", "inc_1", "recommendation", "Restart netbird-agent", "llm",
-				"", 0.8, []byte("[]"), []byte("[]"), 1))
+			AddRow("ev_1", "inc_1", "irun_1", "likely_cause", "netbird tunnel dropped", "llm",
+				"prometheus up + loki docker_logs", 0.85, "{}", "{}", 0).
+			AddRow("ev_2", "inc_1", "irun_1", "recommendation", "Restart netbird-agent", "llm",
+				"", 0.8, "{}", "{}", 1))
 
 	got, err := r.LoadIncidentFindings(context.Background(), "inc_1")
 	require.NoError(t, err)
@@ -203,12 +209,6 @@ func TestLoadIncidentFindingsSurvivesAMissingInvestigation(t *testing.T) {
 		WithArgs("inc_2").
 		WillReturnError(sql.ErrNoRows)
 
-	mock.ExpectQuery("FROM evidence e").
-		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "incident_id", "type", "content", "source", "source_detail",
-			"confidence", "supports_evidence", "contradicts_evidence", "ordinal",
-		}))
-
 	got, err := r.LoadIncidentFindings(context.Background(), "inc_2")
 	require.NoError(t, err)
 	require.Nil(t, got.Run)
@@ -226,4 +226,99 @@ func TestLookupFallbackAffected(t *testing.T) {
 	result := r.lookupFallbackAffected(context.Background(), "inc_crash")
 	require.Equal(t, []string{"pamawas-ingest-pod-1"}, result)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSelectInvestigationRunsPinsOnlyCompletedFullRuns(t *testing.T) {
+	r, mock := newMockReporter(t, ReporterConfig{})
+	snapshot := time.Date(2026, 11, 24, 1, 2, 3, 0, time.UTC)
+	mock.ExpectQuery("SELECT DISTINCT ON \\(incident_id\\)").
+		WithArgs(sqlmock.AnyArg(), snapshot).
+		WillReturnRows(sqlmock.NewRows([]string{"incident_id", "id"}).
+			AddRow("inc_1", "irun_investigation"))
+
+	selected, err := r.selectInvestigationRuns(
+		context.Background(), []string{"inc_1"}, snapshot,
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"inc_1": "irun_investigation"}, selected)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestLoadEvidenceForRunsNeverMixesAnotherRun(t *testing.T) {
+	r, mock := newMockReporter(t, ReporterConfig{})
+	mock.ExpectQuery("WHERE e.run_id = ANY").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "incident_id", "run_id", "type", "content", "source", "source_detail",
+			"confidence", "supports_evidence", "contradicts_evidence", "ordinal",
+		}).AddRow(
+			"ev_1", "inc_1", "irun_investigation", "hypothesis",
+			"A dependency timeout is plausible.", "llm", "synthesis", 0.5,
+			"{ev_fact}", "{}", 0,
+		))
+
+	evidence, err := r.loadEvidenceForRuns(
+		context.Background(), map[string]string{"inc_1": "irun_investigation"},
+	)
+
+	require.NoError(t, err)
+	require.Len(t, evidence["inc_1"], 1)
+	require.Equal(t, "irun_investigation", evidence["inc_1"][0].RunID)
+	require.Equal(t, []string{"ev_fact"}, evidence["inc_1"][0].Supports)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPersistReportStoresPinnedRunID(t *testing.T) {
+	r, mock := newMockReporter(t, ReporterConfig{})
+	now := time.Date(2026, 11, 24, 1, 2, 3, 0, time.UTC)
+	report := models.Report{
+		ID: "rpt_1", RequestID: "rreq_1", ReportType: "daily",
+		PeriodStart: now.Add(-24 * time.Hour), PeriodEnd: now,
+		Timezone: "Asia/Jakarta", TemplateVersion: "pamawas-report-v2",
+		Content: "report", GeneratedAt: now, Status: models.ReportStatusGenerated,
+		CreatedAt: now,
+	}
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO reports").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO report_incidents").
+		WithArgs("rpt_1", "inc_1", models.InclusionReasonOngoing, "irun_1").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	err := r.persistReportWithIncidents(
+		context.Background(), report, []string{"inc_1"},
+		map[string]string{"inc_1": models.InclusionReasonOngoing},
+		map[string]string{"inc_1": "irun_1"},
+	)
+
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPromptEchoUsesDeterministicSummaryFallback(t *testing.T) {
+	incidents := []models.Incident{
+		{Title: "Database Down", Status: "open", Severity: "critical", AffectedServices: []string{"db-a"}},
+		{Title: "CPU", Status: "resolved", Severity: "warning"},
+	}
+	require.True(t, looksLikeSummaryPromptEcho(
+		"We need to summarize the user's request. Use only the facts given and no headings.",
+	))
+	fallback := deterministicDailySummary(incidents)
+	require.Contains(t, fallback, "2 incidents were recorded")
+	require.Contains(t, fallback, "Database Down affecting db-a")
+	require.NotContains(t, strings.ToLower(fallback), "user")
+}
+
+func TestReportHeaderUsesConfiguredTimezone(t *testing.T) {
+	var sb strings.Builder
+	writeReportHeader(
+		&sb,
+		"daily",
+		time.Date(2026, 11, 23, 17, 0, 0, 0, time.UTC),
+		time.Date(2026, 11, 24, 17, 0, 0, 0, time.UTC),
+		"Asia/Jakarta",
+	)
+	require.Contains(t, sb.String(), "2026-11-24 00:00:00 WIB")
+	require.Contains(t, sb.String(), "(Asia/Jakarta)")
+	require.NotContains(t, sb.String(), "17:00:00 UTC (Asia/Jakarta)")
 }

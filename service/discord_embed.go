@@ -113,11 +113,7 @@ func (r *Reporter) buildDiscordMessage(ctx context.Context, report models.Report
 		return r.buildDailyDigestMessage(ctx, report, incidents)
 	}
 
-	incidentIDs := make([]string, 0, len(incidents))
-	for _, inc := range incidents {
-		incidentIDs = append(incidentIDs, inc.ID)
-	}
-	evidence, err := r.loadEvidenceForIncidents(ctx, incidentIDs)
+	evidence, err := r.loadEvidenceForReport(ctx, report.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load evidence: %w", err)
 	}
@@ -200,7 +196,7 @@ func (r *Reporter) buildDailyDigestEmbed(ctx context.Context, report models.Repo
 	// has to act on before starting the day; a recovered incident's cause is
 	// history, and 40 paragraphs of it would recreate the wall of text the
 	// digest exists to replace.
-	openEvidence := r.loadEvidenceForOpen(ctx, open)
+	openEvidence := r.loadEvidenceForOpen(ctx, report.ID, open)
 	digestOpenSection(&sb, open, openEvidence)
 	digestRecoveredSection(&sb, recovered)
 
@@ -227,20 +223,22 @@ func (r *Reporter) buildDailyDigestEmbed(ctx context.Context, report models.Repo
 //
 // A failure is logged and treated as "no findings": the digest must still go
 // out, and a missing cause line is better than a missing report.
-func (r *Reporter) loadEvidenceForOpen(ctx context.Context, open []models.Incident) map[string][]models.Evidence {
+func (r *Reporter) loadEvidenceForOpen(ctx context.Context, reportID string, open []models.Incident) map[string][]models.Evidence {
 	if len(open) == 0 {
 		return nil
 	}
-	ids := make([]string, 0, len(open))
-	for _, inc := range open {
-		ids = append(ids, inc.ID)
-	}
-	evidence, err := r.loadEvidenceForIncidents(ctx, ids)
+	evidence, err := r.loadEvidenceForReport(ctx, reportID)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to load findings for open incidents; digest continues without them")
 		return nil
 	}
-	return evidence
+	openEvidence := make(map[string][]models.Evidence, len(open))
+	for _, inc := range open {
+		if findings, ok := evidence[inc.ID]; ok {
+			openEvidence[inc.ID] = findings
+		}
+	}
+	return openEvidence
 }
 
 // digestOpenSection writes incidents that still need attention, grouped by

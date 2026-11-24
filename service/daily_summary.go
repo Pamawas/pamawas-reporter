@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -102,7 +103,88 @@ func (r *Reporter) summarizeDay(ctx context.Context, report models.Report, incid
 		return ""
 	}
 
-	return strings.TrimSpace(out.Summary)
+	summary := strings.TrimSpace(out.Summary)
+	if looksLikeSummaryPromptEcho(summary) {
+		log.Warn().Str("summary_prefix", truncateSummaryLog(summary)).
+			Msg("Investigator summary echoed instructions; using deterministic fallback")
+		return deterministicDailySummary(incidents)
+	}
+	return summary
+}
+
+func looksLikeSummaryPromptEcho(summary string) bool {
+	lowered := strings.ToLower(strings.Join(strings.Fields(summary), " "))
+	if lowered == "" {
+		return false
+	}
+	markers := []string{
+		"we need answer",
+		"we need to summarize",
+		"need produce",
+		"the user wants",
+		"the user asked",
+		"user's request",
+		"system prompt",
+		"developer message",
+		"thinking process",
+		"analyze the request",
+		"output format",
+		"no bullet points",
+		"no headings",
+		"at most three sentences",
+		"use only the facts given",
+		"write the summary",
+	}
+	hits := 0
+	for _, marker := range markers {
+		if strings.Contains(lowered, marker) {
+			hits++
+		}
+	}
+	return hits >= 2 || strings.Contains(lowered, "<think>")
+}
+
+func truncateSummaryLog(summary string) string {
+	const limit = 160
+	if len(summary) <= limit {
+		return summary
+	}
+	return summary[:limit]
+}
+
+func deterministicDailySummary(incidents []models.Incident) string {
+	open, resolved := 0, 0
+	var highestOpen *models.Incident
+	for i := range incidents {
+		inc := &incidents[i]
+		switch inc.Status {
+		case "open", "investigating":
+			open++
+			if highestOpen == nil || severityRank(inc.Severity) > severityRank(highestOpen.Severity) {
+				highestOpen = inc
+			}
+		case "resolved":
+			resolved++
+		}
+	}
+	summary := fmt.Sprintf(
+		"%d incidents were recorded, %d remain open or under investigation and %d resolved.",
+		len(incidents), open, resolved,
+	)
+	if highestOpen != nil {
+		target := affectedLabel(*highestOpen)
+		if target != "" {
+			return fmt.Sprintf(
+				"%s The highest-severity unresolved condition is %s affecting %s.",
+				summary, highestOpen.Title, target,
+			)
+		}
+		return fmt.Sprintf(
+			"%s The highest-severity unresolved condition is %s.",
+			summary, highestOpen.Title,
+		)
+	}
+	return summary
 }
 
 // dailySummaryRequest is the fact sheet the investigator summarises. It carries

@@ -195,11 +195,6 @@ func TestIncidentFindingsHandlerServesTheRoute(t *testing.T) {
 	mock.ExpectQuery("FROM investigation_runs").
 		WithArgs("inc_route").
 		WillReturnError(sql.ErrNoRows)
-	mock.ExpectQuery("FROM evidence e").
-		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "incident_id", "type", "content", "source", "source_detail",
-			"confidence", "supports_evidence", "contradicts_evidence", "ordinal",
-		}))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/incidents/{id}/findings", h.IncidentFindingsHandler)

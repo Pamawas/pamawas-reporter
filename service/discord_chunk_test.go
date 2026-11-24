@@ -137,11 +137,15 @@ func TestHighSeverityReportIsOneTriageCard(t *testing.T) {
 			"correlation_policy", "correlation_version",
 		}).AddRow(incidentID, "Monitoring Target Down", "open", time.Now(),
 			nil, "critical", "production", "{last-labs}", "service_time_window", 1))
+	mock.ExpectQuery("SELECT incident_id, run_id").
+		WithArgs("test-id").
+		WillReturnRows(sqlmock.NewRows([]string{"incident_id", "run_id"}).
+			AddRow(incidentID, "irun_1"))
 	mock.ExpectQuery("FROM evidence e").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "incident_id", "type", "content", "source", "source_detail",
+			"id", "incident_id", "run_id", "type", "content", "source", "source_detail",
 			"confidence", "supports_evidence", "contradicts_evidence", "ordinal",
-		}).AddRow("evd_1", incidentID, "fact", "CPU load spiked to 17",
+		}).AddRow("evd_1", incidentID, "irun_1", "fact", "CPU load spiked to 17",
 			"prometheus", "node_load1", 0.95, "{}", "{}", 0))
 
 	if err := r.sendToDiscord(context.Background(), report); err != nil {
