@@ -473,6 +473,15 @@ func (r *Reporter) buildSingleIncidentEmbed(report models.Report, inc models.Inc
 	embed := buildIncidentEmbed(report, inc, nil, inclusionReason)
 
 	cause, actions, evidence := triageFindings(evList)
+	supporting := make([]models.Evidence, 0, len(evidence))
+	gaps := make([]models.Evidence, 0)
+	for _, ev := range evidence {
+		if ev.Type == "unknown" {
+			gaps = append(gaps, ev)
+			continue
+		}
+		supporting = append(supporting, ev)
+	}
 
 	var sb strings.Builder
 
@@ -504,15 +513,22 @@ func (r *Reporter) buildSingleIncidentEmbed(report models.Report, inc models.Inc
 			fmt.Fprintf(&sb, "%d. %s\n", i+1, clipSentence(rec.Content, cardActionLimit))
 		}
 	}
-	if len(evidence) > 0 {
+	if len(supporting) > 0 {
 		sb.WriteString("\n**📋 Supporting evidence**\n")
-		for _, ev := range evidence {
+		for _, ev := range supporting {
 			fmt.Fprintf(&sb, "%s %s%s\n",
 				evidenceIcon(ev.Type),
 				clipSentence(ev.Content, cardEvidenceLimit), evidenceSourceSuffix(ev))
 		}
 	}
-	if cause == nil && len(actions) == 0 && len(evidence) == 0 {
+	if len(gaps) > 0 {
+		sb.WriteString("\n**❓ Evidence gaps**\n")
+		for _, gap := range gaps {
+			fmt.Fprintf(&sb, "• %s%s\n",
+				clipSentence(gap.Content, cardEvidenceLimit), evidenceSourceSuffix(gap))
+		}
+	}
+	if cause == nil && len(actions) == 0 && len(supporting) == 0 && len(gaps) == 0 {
 		sb.WriteString("_🔍 Investigation unavailable_")
 	}
 

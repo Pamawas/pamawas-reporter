@@ -401,6 +401,31 @@ func TestPartialInvestigationCardShowsCauseAssessmentAndActions(t *testing.T) {
 	}
 }
 
+func TestSourceGapIsNotRenderedAsSupportingEvidence(t *testing.T) {
+	embed := buildSingleIncidentEmbedForTest(models.Incident{
+		ID: "inc_gap", Title: "Ceph OSD High Latency", Status: "resolved",
+		Severity: "warning", StartedAt: time.Now().Add(-time.Minute),
+	}, []models.Evidence{
+		{ID: "fact", Type: "fact", Content: "OSD latency peaked at 271 ms", Source: "prometheus"},
+		{ID: "cause", Type: "hypothesis", Content: "Storage contention is plausible", Source: "llm", Confidence: 0.35},
+		{ID: "gap", Type: "unknown", Content: "Loki has no matching Ceph target", Source: "system"},
+		{ID: "action", Type: "recommendation", Content: "Compare disk queue depth", Source: "system"},
+	})
+
+	supportAt := strings.Index(embed.Description, "Supporting evidence")
+	gapAt := strings.Index(embed.Description, "Evidence gaps")
+	if supportAt < 0 || gapAt <= supportAt {
+		t.Fatalf("supporting evidence and gaps must be separate sections: %s", embed.Description)
+	}
+	supportingSection := embed.Description[supportAt:gapAt]
+	if strings.Contains(supportingSection, "Loki has no matching Ceph target") {
+		t.Fatalf("a source gap was presented as supporting evidence: %s", embed.Description)
+	}
+	if !strings.Contains(embed.Description[gapAt:], "Loki has no matching Ceph target") {
+		t.Fatalf("source gap missing from evidence-gaps section: %s", embed.Description)
+	}
+}
+
 func buildSingleIncidentEmbedForTest(inc models.Incident, evList []models.Evidence) discordEmbed {
 	r := &Reporter{config: ReporterConfig{HighSeverityThreshold: "high"}}
 	report := models.Report{TemplateVersion: "pamawas-report-v2", GeneratedAt: time.Now()}
