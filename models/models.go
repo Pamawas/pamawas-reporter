@@ -128,8 +128,9 @@ type Evidence struct {
 	RunID      string `json:"run_id"`
 	Type       string `json:"type"`
 	Content    string `json:"content"`
-	// Source is the closed set the investigator records: prometheus, loki,
-	// incidents, llm (its own synthesis), or system (a harness limit).
+	// Source is the closed set the investigator records: alert (explicit values
+	// from the event payload), prometheus, loki, incidents, llm (its own
+	// synthesis), or system (a harness limit).
 	Source string `json:"source"`
 	// SourceDetail is the specific query, stream, or metric the finding rests
 	// on, e.g. 'up{job="system_node", instance="koba-labs"}'.

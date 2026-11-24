@@ -775,6 +775,14 @@ func TestEvidenceUnderscoresAreEscaped(t *testing.T) {
 	}
 }
 
+func TestEvidenceSourceSuffixLabelsAlertPayload(t *testing.T) {
+	ev := models.Evidence{Source: "alert", SourceDetail: "alert events: evt_1"}
+
+	if got := evidenceSourceSuffix(ev); got != " _[alert payload]_" {
+		t.Fatalf("unexpected alert source suffix: %q", got)
+	}
+}
+
 // TestSingleIncidentCardLeadsWithWhatIsDown pins the reading order an on-call
 // engineer asked for: what is broken, then the findings.
 //

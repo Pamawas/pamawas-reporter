@@ -787,6 +787,8 @@ func escapeDiscordMarkdown(s string) string {
 // evidenceSourceLabel maps a finding's source onto a display label.
 func evidenceSourceLabel(source string) string {
 	switch source {
+	case "alert":
+		return "alert payload"
 	case "prometheus":
 		return "Prometheus"
 	case "loki":
