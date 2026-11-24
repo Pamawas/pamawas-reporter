@@ -398,16 +398,6 @@ ORDER BY e.incident_id, e.ordinal`
 	return incidentEvidence, rows.Err()
 }
 
-// loadEvidenceForIncidents is the on-demand/latest-full wrapper. Report
-// generation uses the snapshot-aware selection above and persists those IDs.
-func (r *Reporter) loadEvidenceForIncidents(ctx context.Context, incidentIDs []string) (map[string][]models.Evidence, error) {
-	selected, err := r.selectInvestigationRuns(ctx, incidentIDs, time.Now())
-	if err != nil {
-		return nil, err
-	}
-	return r.loadEvidenceForRuns(ctx, selected)
-}
-
 // loadEvidenceForReport reuses the immutable run selections persisted with a
 // report. Delivery retries therefore render the same findings as generation,
 // even when newer investigations finish before a channel retry succeeds.
