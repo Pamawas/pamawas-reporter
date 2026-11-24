@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -267,7 +268,7 @@ func (r *Reporter) selectDailyIncidents(ctx context.Context, periodStart, period
 		WHERE i.started_at < $2
 		  AND (i.resolved_at IS NULL OR i.resolved_at > $1)
 		  AND i.status IN ('open', 'investigating', 'resolved', 'suppressed')
-		ORDER BY i.started_at DESC
+		ORDER BY i.started_at DESC, i.id DESC
 	`
 
 	rows, err := r.db.QueryContext(ctx, query, periodStart, periodEnd)
@@ -325,7 +326,7 @@ func (r *Reporter) selectInvestigationRuns(ctx context.Context, incidentIDs []st
 		  AND run_kind = 'investigation'
 		  AND status = 'completed'
 		  AND completed_at <= $2
-		ORDER BY incident_id, completed_at DESC, created_at DESC
+		ORDER BY incident_id, completed_at DESC, created_at DESC, id DESC
 	`
 	rows, err := r.db.QueryContext(ctx, query, pq.Array(incidentIDs), snapshotAt)
 	if err != nil {
@@ -361,6 +362,7 @@ func (r *Reporter) loadEvidenceForRuns(ctx context.Context, selectedRuns map[str
 			runIDs = append(runIDs, runID)
 		}
 	}
+	sort.Strings(runIDs)
 	if len(runIDs) == 0 {
 		return incidentEvidence, nil
 	}
@@ -480,7 +482,7 @@ func (r *Reporter) LoadIncidentFindings(ctx context.Context, incidentID string) 
 		FROM investigation_runs
 		WHERE incident_id = $1
 		  AND run_kind = 'investigation'
-		ORDER BY created_at DESC
+		ORDER BY created_at DESC, id DESC
 		LIMIT 1
 	`
 	var run models.RunStatus
@@ -1052,7 +1054,7 @@ func (r *Reporter) loadIncidentTargets(ctx context.Context, incidentIDs []string
 			(e.labels->>'node' IS NOT NULL AND e.labels->>'node' != '') OR
 			(e.labels->>'host' IS NOT NULL AND e.labels->>'host' != '')
 		  )
-		ORDER BY ie.incident_id, e.occurred_at DESC
+		ORDER BY ie.incident_id, e.occurred_at DESC, e.id DESC
 	`
 	rows, err := r.db.QueryContext(ctx, query, pq.Array(incidentIDs))
 	if err != nil {
@@ -1086,7 +1088,7 @@ func (r *Reporter) getIncidentsByIDs(ctx context.Context, incidentIDs []string) 
        affected_services, correlation_policy, correlation_version
 FROM incidents
 WHERE id = ANY($1)
-ORDER BY started_at DESC`
+ORDER BY started_at DESC, id DESC`
 
 	rows, err := r.db.QueryContext(ctx, query, pq.Array(incidentIDs))
 	if err != nil {
@@ -2128,7 +2130,7 @@ func (r *Reporter) lookupResolveIncident(ctx context.Context, subject alertSubje
 		WHERE environment = $1
 		  AND $2 = ANY(affected_services)
 		  AND started_at <= $3
-		ORDER BY started_at DESC
+		ORDER BY started_at DESC, id DESC
 		LIMIT 1
 	`, subject.Environment, affected, subject.StartedAt).Scan(&incidentID)
 	if err != nil {

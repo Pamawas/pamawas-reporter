@@ -453,10 +453,16 @@ func splitByStatus(incidents []models.Incident) (open, recovered []models.Incide
 		if a, b := severityRank(open[i].Severity), severityRank(open[j].Severity); a != b {
 			return a > b
 		}
-		return open[i].StartedAt.Before(open[j].StartedAt)
+		if !open[i].StartedAt.Equal(open[j].StartedAt) {
+			return open[i].StartedAt.Before(open[j].StartedAt)
+		}
+		return open[i].ID < open[j].ID
 	})
 	sort.SliceStable(recovered, func(i, j int) bool {
-		return recovered[i].ResolvedAt.After(recovered[j].ResolvedAt)
+		if !recovered[i].ResolvedAt.Equal(recovered[j].ResolvedAt) {
+			return recovered[i].ResolvedAt.After(recovered[j].ResolvedAt)
+		}
+		return recovered[i].ID < recovered[j].ID
 	})
 	return open, recovered
 }
