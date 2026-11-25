@@ -1219,9 +1219,10 @@ func buildVerifyEmbed(payload models.VerifyReportPayload) discordEmbed {
 	fields = trimAlertFields(fields)
 
 	verdictTitle := "⚠️"
-	if payload.Verdict == "recovered" {
+	switch payload.Verdict {
+	case "recovered":
 		verdictTitle = "✅"
-	} else if payload.Verdict == "inconclusive" {
+	case "inconclusive":
 		verdictTitle = "❓"
 	}
 	titleStr := fmt.Sprintf("%s Verification: %s • %s", verdictTitle, verdictLabel, payload.Title)
@@ -1238,9 +1239,10 @@ func buildVerifyEmbed(payload models.VerifyReportPayload) discordEmbed {
 	// critical. A still_down card keeps the severity colour — the target is
 	// failing again, so the bar should still say how urgent it is.
 	color := severityEmbedColor(payload.Severity)
-	if payload.Verdict == "recovered" {
+	switch payload.Verdict {
+	case "recovered":
 		color = discordColorResolved
-	} else if payload.Verdict == "inconclusive" {
+	case "inconclusive":
 		color = discordColorNeutral
 	}
 
@@ -1262,9 +1264,10 @@ func formatVerifyMessage(payload models.VerifyReportPayload) string {
 	var sb strings.Builder
 	verdictLabel := formatVerdict(payload.Verdict)
 	heading := "⚠️ *Verification: Still Down*"
-	if payload.Verdict == "recovered" {
+	switch payload.Verdict {
+	case "recovered":
 		heading = "✅ *Verification: Recovered*"
-	} else if payload.Verdict == "inconclusive" {
+	case "inconclusive":
 		heading = "❓ *Verification: Inconclusive*"
 	}
 	sb.WriteString(heading + "\n")
