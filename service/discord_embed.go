@@ -1169,6 +1169,8 @@ func formatVerdict(verdict string) string {
 		return "Still Down"
 	case "recovered":
 		return "Recovered"
+	case "inconclusive":
+		return "Inconclusive"
 	default:
 		return verdict
 	}
@@ -1179,7 +1181,8 @@ func formatVerdict(verdict string) string {
 // This is the "why" behind a close-or-keep-open decision. The correlator ran a
 // verification because an incident went silent past INCIDENT_STALE_AFTER; this
 // card tells the operator what the evidence said, and therefore why the
-// incident was closed (recovered) or left open (still down).
+// incident was closed (recovered), left open (still down), or left undecided
+// because the authoritative condition state was unavailable (inconclusive).
 func buildVerifyEmbed(payload models.VerifyReportPayload) discordEmbed {
 	description := payload.Reason
 	if description == "" {
@@ -1218,6 +1221,8 @@ func buildVerifyEmbed(payload models.VerifyReportPayload) discordEmbed {
 	verdictTitle := "⚠️"
 	if payload.Verdict == "recovered" {
 		verdictTitle = "✅"
+	} else if payload.Verdict == "inconclusive" {
+		verdictTitle = "❓"
 	}
 	titleStr := fmt.Sprintf("%s Verification: %s • %s", verdictTitle, verdictLabel, payload.Title)
 	if payload.Target != "" {
@@ -1235,6 +1240,8 @@ func buildVerifyEmbed(payload models.VerifyReportPayload) discordEmbed {
 	color := severityEmbedColor(payload.Severity)
 	if payload.Verdict == "recovered" {
 		color = discordColorResolved
+	} else if payload.Verdict == "inconclusive" {
+		color = discordColorNeutral
 	}
 
 	return discordEmbed{
@@ -1257,6 +1264,8 @@ func formatVerifyMessage(payload models.VerifyReportPayload) string {
 	heading := "⚠️ *Verification: Still Down*"
 	if payload.Verdict == "recovered" {
 		heading = "✅ *Verification: Recovered*"
+	} else if payload.Verdict == "inconclusive" {
+		heading = "❓ *Verification: Inconclusive*"
 	}
 	sb.WriteString(heading + "\n")
 	if payload.Title != "" {

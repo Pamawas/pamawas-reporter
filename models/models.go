@@ -351,8 +351,8 @@ type AlertResponse struct {
 //
 // The scheduler sends it after the investigator verifies a stale-open
 // incident: the verdict says whether the incident was closed (recovered) or
-// kept open (still_down), and the reason and findings say why. The reporter
-// renders it as a one-off notification card.
+// kept open because it is still_down or inconclusive, and the reason and
+// findings say why. The reporter renders it as a one-off notification card.
 type VerifyReportPayload struct {
 	ContractVersion int        `json:"contract_version"`
 	IncidentID      string     `json:"incident_id"`

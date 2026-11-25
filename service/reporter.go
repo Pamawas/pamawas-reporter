@@ -2010,15 +2010,15 @@ func (r *Reporter) SendAlert(ctx context.Context, payload models.AlertPayload) (
 //
 // The correlator calls this after the investigator verifies an incident that
 // went silent past INCIDENT_STALE_AFTER. The verdict and its evidence are sent
-// as a one-off card explaining why the incident was closed (recovered) or left
-// open (still down). It is not one-shot like the immediate alert: a later
+// as a one-off card explaining why the incident was closed (recovered), left
+// open (still down), or could not be decided (inconclusive). It is not one-shot like the immediate alert: a later
 // re-verification of the same incident sends its own card.
 func (r *Reporter) SendVerifyReport(ctx context.Context, payload models.VerifyReportPayload) (*models.AlertResponse, error) {
 	if payload.IncidentID == "" {
 		return &models.AlertResponse{Sent: false, Skipped: true, Reason: "invalid_request", Message: "incident_id is required"}, nil
 	}
-	if payload.Verdict != "recovered" && payload.Verdict != "still_down" {
-		return &models.AlertResponse{Sent: false, Skipped: true, Reason: "invalid_request", Message: "verdict must be recovered or still_down"}, nil
+	if payload.Verdict != "recovered" && payload.Verdict != "still_down" && payload.Verdict != "inconclusive" {
+		return &models.AlertResponse{Sent: false, Skipped: true, Reason: "invalid_request", Message: "verdict must be recovered, still_down, or inconclusive"}, nil
 	}
 
 	content := alertContent{

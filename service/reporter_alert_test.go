@@ -1006,8 +1006,29 @@ func TestSendVerifyReportDeliversTheWhy(t *testing.T) {
 	}
 }
 
-// TestSendVerifyReportRejectsABadVerdict pins the contract: only recovered and
-// still_down are valid verdicts.
+func TestSendVerifyReportDeliversInconclusiveWithoutClaimingStillDown(t *testing.T) {
+	r, _, calls := newAlertTestReporter(t, "high")
+
+	resp, err := r.SendVerifyReport(context.Background(), models.VerifyReportPayload{
+		ContractVersion: 1,
+		IncidentID:      "inc_unknown",
+		Verdict:         "inconclusive",
+		Title:           "Source-owned condition",
+		Reason:          "The authoritative condition source was unavailable.",
+	})
+
+	if err != nil {
+		t.Fatalf("SendVerifyReport error: %v", err)
+	}
+	if !resp.Sent {
+		t.Fatalf("expected the inconclusive verification card to be sent, got %+v", resp)
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("delivery attempted %d times, want 1", got)
+	}
+}
+
+// TestSendVerifyReportRejectsABadVerdict pins the closed verdict contract.
 func TestSendVerifyReportRejectsABadVerdict(t *testing.T) {
 	r, _, calls := newAlertTestReporter(t, "high")
 
