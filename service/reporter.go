@@ -557,34 +557,31 @@ func (r *Reporter) generateReportContent(
 
 	writeReportHeader(&sb, reportType, periodStart, periodEnd, timezone)
 
-	// Summary
-	totalIncidents := len(incidents)
-	needsAttention, resolvedCount := countIncidentStatuses(incidents)
+	// Daily reports carry period-level context. Immediate incident reports are
+	// deterministic and incident-only: period availability and an LLM-written
+	// day summary do not describe the incident and can contradict its evidence.
+	if reportType == "daily" {
+		totalIncidents := len(incidents)
+		needsAttention, resolvedCount := countIncidentStatuses(incidents)
+		availability := r.getAvailabilityMetric(ctx, periodStart, periodEnd)
+		if availability >= 0 {
+			fmt.Fprintf(&sb, "Infrastructure was %.2f%% available during this period.\n", availability)
+		} else {
+			sb.WriteString("Availability: unavailable (no named availability metric configured)\n")
+		}
+		fmt.Fprintf(&sb, "%d incidents occurred. %d need attention. %d resolved.\n\n",
+			totalIncidents, needsAttention, resolvedCount)
 
-	// Availability - only if we have a real metric
-	availability := r.getAvailabilityMetric(ctx, periodStart, periodEnd)
-	if availability >= 0 {
-		fmt.Fprintf(&sb, "Infrastructure was %.2f%% available during this period.\n", availability)
-	} else {
-		sb.WriteString("Availability: unavailable (no named availability metric configured)\n")
-	}
-
-	fmt.Fprintf(&sb, "%d incidents occurred. %d need attention. %d resolved.\n\n",
-		totalIncidents, needsAttention, resolvedCount)
-
-	// Ask the investigator for a prose summary of the day. This is the only
-	// place the daily digest gets a narrative; without it the report is a bare
-	// incident list. Failure is non-fatal: summarizeDay returns "" and the
-	// deterministic sections still render.
-	if summary := r.summarizeDay(ctx, models.Report{
-		ReportType:  reportType,
-		PeriodStart: periodStart,
-		PeriodEnd:   periodEnd,
-		Timezone:    timezone,
-	}, incidents); summary != "" {
-		sb.WriteString("**Summary**\n")
-		sb.WriteString(summary)
-		sb.WriteString("\n\n")
+		if summary := r.summarizeDay(ctx, models.Report{
+			ReportType:  reportType,
+			PeriodStart: periodStart,
+			PeriodEnd:   periodEnd,
+			Timezone:    timezone,
+		}, incidents); summary != "" {
+			sb.WriteString("**Summary**\n")
+			sb.WriteString(summary)
+			sb.WriteString("\n\n")
+		}
 	}
 
 	// Split incidents into unresolved (needs attention) and solved sections
@@ -619,7 +616,7 @@ func writeReportHeader(sb *strings.Builder, reportType string, periodStart, peri
 		fmt.Fprintf(sb, "📅 Daily Infrastructure Report\n")
 		fmt.Fprintf(sb, "Period: %s to %s (%s)\n\n", localStart, localEnd, timezone)
 	} else {
-		fmt.Fprintf(sb, "🚨 High Severity Immediate Report\n")
+		fmt.Fprintf(sb, "🚨 Incident Report\n")
 		fmt.Fprintf(sb, "Period: %s to %s (%s)\n\n", localStart, localEnd, timezone)
 	}
 }
@@ -644,8 +641,10 @@ func writeIncidentDetails(sb *strings.Builder, unresolved, resolved []models.Inc
 		return
 	}
 
-	sb.WriteString("## Unresolved (needs attention)\n")
-	writeIncidentDetailsList(sb, unresolved, incidentEvidence, inclusionReasons)
+	if len(unresolved) > 0 {
+		sb.WriteString("## Unresolved (needs attention)\n")
+		writeIncidentDetailsList(sb, unresolved, incidentEvidence, inclusionReasons)
+	}
 
 	if len(resolved) > 0 {
 		sb.WriteString("## Solved (resolved during period)\n")
@@ -891,8 +890,10 @@ func writeIncidentDetailsV2(sb *strings.Builder, unresolved, resolved []models.I
 		return
 	}
 
-	sb.WriteString("## Unresolved (needs attention)\n")
-	writeIncidentCardListV2(sb, unresolved, incidentEvidence, inclusionReasons, timezone)
+	if len(unresolved) > 0 {
+		sb.WriteString("## Unresolved (needs attention)\n")
+		writeIncidentCardListV2(sb, unresolved, incidentEvidence, inclusionReasons, timezone)
+	}
 
 	if len(resolved) > 0 {
 		sb.WriteString("## Solved (resolved during period)\n")
@@ -944,7 +945,7 @@ func writeIncidentCardV2(sb *strings.Builder, inc models.Incident, evList []mode
 	}
 
 	fmt.Fprintf(sb, "%s **%s** (%s)%s\n", statusBadge, inc.Title, inc.Status, reasonLabel)
-	fmt.Fprintf(sb, "🔴 Severity: %s %s\n", sevBadge, inc.Severity)
+	fmt.Fprintf(sb, "Severity: %s %s\n", sevBadge, inc.Severity)
 	if inc.Target != "" {
 		fmt.Fprintf(sb, "🎯 Target: %s\n", inc.Target)
 	}

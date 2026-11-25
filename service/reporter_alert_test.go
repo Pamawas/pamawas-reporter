@@ -636,8 +636,8 @@ func TestReportCardsNameTheirReport(t *testing.T) {
 	}
 
 	high := buildIncidentEmbed(models.Report{ReportType: "high_severity", Timezone: "UTC"}, inc, nil, "newly_started")
-	if !strings.HasPrefix(high.Title, "🚨 High-Severity Report") {
-		t.Errorf("high-severity card must name its report, got %q", high.Title)
+	if !strings.HasPrefix(high.Title, "🚨 Incident Report") {
+		t.Errorf("immediate card must name its report, got %q", high.Title)
 	}
 }
 
@@ -839,6 +839,33 @@ func TestSingleIncidentCardLeadsWithWhatIsDown(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(names, ","), "Incident ID") {
 		t.Errorf("incident ID must survive for follow-up, got %v", names)
+	}
+}
+
+func TestIncidentStateConflictDoesNotClaimStillDown(t *testing.T) {
+	now := time.Now()
+	inc := models.Incident{
+		ID: "inc_conflict", Title: "Authentik Worker Absent", Status: "open",
+		Severity: "critical", StartedAt: now.Add(-20 * time.Minute),
+		AffectedServices: []string{"authentik-worker"},
+	}
+	r := &Reporter{}
+
+	card := r.buildSingleIncidentEmbed(
+		models.Report{ReportType: "high_severity", Timezone: "UTC", GeneratedAt: now},
+		inc,
+		[]models.Evidence{{
+			Type: "fact", Content: "Current worker count is 1.", Source: "prometheus",
+			SourceDetail: "incident-state reconciliation", Confidence: 1,
+		}},
+		"newly_started",
+	)
+
+	if strings.Contains(card.Description, "Still down") {
+		t.Fatalf("conflicting current telemetry must not be rendered as still down:\n%s", card.Description)
+	}
+	if !strings.Contains(card.Description, "Incident state may be stale") {
+		t.Fatalf("expected stale-state warning:\n%s", card.Description)
 	}
 }
 

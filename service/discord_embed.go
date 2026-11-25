@@ -496,7 +496,7 @@ func (r *Reporter) buildSingleIncidentEmbed(report models.Report, inc models.Inc
 	// "what, where, how long" inverts their question. Discord renders the
 	// description above the fields, so this has to be in the description —
 	// fields alone always appear below the findings.
-	sb.WriteString(r.incidentHeadline(inc, report))
+	sb.WriteString(r.incidentHeadline(inc, report, evList))
 
 	if cause != nil {
 		// Say which kind of claim this is. A hypothesis is the investigator
@@ -574,7 +574,7 @@ func onlyFields(fields []discordEmbedField, keep ...string) []discordEmbedField 
 // One line, because it is a glance, not a paragraph: the fields below the
 // description already carry the exact timestamps and the incident ID for anyone
 // who needs to look further.
-func (r *Reporter) incidentHeadline(inc models.Incident, report models.Report) string {
+func (r *Reporter) incidentHeadline(inc models.Incident, report models.Report, evList []models.Evidence) string {
 	parts := []string{severityColor(inc.Severity) + " **" + escapeDiscordMarkdown(inc.Title) + "**"}
 	if inc.Target != "" && inc.Target != affectedLabel(inc) && affectedLabel(inc) != "" {
 		parts = append(parts, "on **"+escapeDiscordMarkdown(inc.Target)+"** ("+escapeDiscordMarkdown(affectedLabel(inc))+")")
@@ -595,10 +595,22 @@ func (r *Reporter) incidentHeadline(inc models.Incident, report models.Report) s
 
 	var state string
 	if inc.ResolvedAt.IsZero() {
-		// "Still down" already carries the status, so the status word itself
-		// would read "Still down, open open". The badge keeps the colour cue.
-		state = fmt.Sprintf("%s Still down for %s",
-			statusColor(inc.Status), formatElapsed(report.GeneratedAt.Sub(inc.StartedAt)))
+		conflict := false
+		for _, ev := range evList {
+			if ev.SourceDetail == "incident-state reconciliation" {
+				conflict = true
+				break
+			}
+		}
+		if conflict {
+			state = fmt.Sprintf("⚠️ Incident state may be stale after %s; current telemetry reports recovery",
+				formatElapsed(report.GeneratedAt.Sub(inc.StartedAt)))
+		} else {
+			// "Still down" already carries the status, so the status word itself
+			// would read "Still down, open open". The badge keeps the colour cue.
+			state = fmt.Sprintf("%s Still down for %s",
+				statusColor(inc.Status), formatElapsed(report.GeneratedAt.Sub(inc.StartedAt)))
+		}
 	} else {
 		state = fmt.Sprintf("%s Recovered after %s",
 			statusColor(inc.Status), formatElapsed(inc.ResolvedAt.Sub(inc.StartedAt)))
@@ -708,7 +720,7 @@ func (r *Reporter) buildSummaryEmbed(ctx context.Context, report models.Report, 
 
 	title := "📅 Daily Infrastructure Report"
 	if report.ReportType != "daily" {
-		title = "🚨 High Severity Immediate Report"
+		title = "🚨 Incident Report"
 	}
 
 	// Red when anything needs attention, green when everything recovered.
@@ -853,7 +865,7 @@ func reportLabel(report models.Report) string {
 	if report.ReportType == "daily" {
 		return "📅 Daily Report"
 	}
-	return "🚨 High-Severity Report"
+	return "🚨 Incident Report"
 }
 
 // formatFindingsForEmbed renders investigation findings as a compact list that

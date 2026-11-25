@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -321,4 +322,66 @@ func TestReportHeaderUsesConfiguredTimezone(t *testing.T) {
 	require.Contains(t, sb.String(), "2026-11-24 00:00:00 WIB")
 	require.Contains(t, sb.String(), "(Asia/Jakarta)")
 	require.NotContains(t, sb.String(), "17:00:00 UTC (Asia/Jakarta)")
+}
+
+func TestImmediateReportHeaderUsesIncidentName(t *testing.T) {
+	var sb strings.Builder
+	writeReportHeader(
+		&sb,
+		"high_severity",
+		time.Date(2026, 11, 23, 17, 0, 0, 0, time.UTC),
+		time.Date(2026, 11, 23, 18, 0, 0, 0, time.UTC),
+		"UTC",
+	)
+	require.Contains(t, sb.String(), "🚨 Incident Report")
+	require.NotContains(t, sb.String(), "High Severity")
+}
+
+func TestIncidentSectionsDoNotRenderEmptyHeadings(t *testing.T) {
+	resolved := []models.Incident{{
+		ID: "inc_1", Title: "CPU", Status: "resolved", Severity: "warning",
+		StartedAt: time.Now().Add(-time.Minute), ResolvedAt: time.Now(),
+	}}
+	var sb strings.Builder
+	writeIncidentDetails(&sb, nil, resolved, nil, nil)
+
+	require.NotContains(t, sb.String(), "Unresolved")
+	require.Contains(t, sb.String(), "Solved")
+}
+
+func TestPlainIncidentCardUsesSeverityBadgeWithoutHardcodedRed(t *testing.T) {
+	inc := models.Incident{
+		ID: "inc_warning", Title: "CPU", Status: "open", Severity: "warning",
+		StartedAt: time.Now(),
+	}
+	var sb strings.Builder
+	writeIncidentCardV2(&sb, inc, nil, "", "UTC")
+
+	require.Contains(t, sb.String(), "Severity: 🟡 warning")
+	require.NotContains(t, sb.String(), "🔴 Severity:")
+}
+
+func TestImmediatePlainReportSkipsPeriodSummaryProviders(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	r, _ := newMockReporter(t, ReporterConfig{
+		PrometheusURL: server.URL, AvailabilityMetric: "up",
+		InvestigatorURL: server.URL, SummaryTimeout: time.Second,
+		ReportTemplate: "v2",
+	})
+	content, err := r.generateReportContent(
+		context.Background(), "high_severity",
+		time.Now().Add(-time.Hour), time.Now(), "UTC",
+		nil, nil, nil, time.Now(),
+	)
+
+	require.NoError(t, err)
+	require.Zero(t, atomic.LoadInt32(&calls))
+	require.NotContains(t, content, "Availability")
+	require.NotContains(t, content, "**Summary**")
 }
